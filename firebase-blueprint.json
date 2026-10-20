@@ -1,0 +1,162 @@
+{
+  "entities": {
+    "QuestionMCQ": {
+      "title": "Multiple Choice Question",
+      "description": "A question with 4 options and 1 correct answer.",
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "options": { "type": "array", "items": { "type": "string" } },
+        "correctAnswerIndex": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["text", "options", "correctAnswerIndex"]
+    },
+    "QuestionTF": {
+      "title": "True/False Question",
+      "description": "A question with 4 statements, each needing a True/False answer.",
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "statements": { 
+          "type": "array", 
+          "items": { 
+            "type": "object",
+            "properties": {
+              "text": { "type": "string" },
+              "isTrue": { "type": "boolean" }
+            }
+          } 
+        },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["text", "statements"]
+    },
+    "QuestionSA": {
+      "title": "Short Answer Question",
+      "description": "A question requiring a text response.",
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "correctAnswers": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["text", "correctAnswers"]
+    },
+    "QuizResult": {
+      "title": "Quiz Result",
+      "description": "A student's quiz score and metadata.",
+      "type": "object",
+      "properties": {
+        "studentName": { "type": "string" },
+        "studentUsername": { "type": "string" },
+        "studentId": { "type": "string" },
+        "classId": { "type": "string" },
+        "className": { "type": "string" },
+        "teacherId": { "type": "string" },
+        "score": { "type": "integer" },
+        "total": { "type": "integer" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "userId": { "type": "string" }
+      },
+      "required": ["studentName", "score", "total", "timestamp"]
+    },
+    "Teacher": {
+      "title": "Teacher Account",
+      "description": "Teacher account registered and approved by Admin.",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "subject": { "type": "string" },
+        "password": { "type": "string" },
+        "sheetUrl": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "approvedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["username", "name", "password", "status"]
+    },
+    "Class": {
+      "title": "Class Room",
+      "description": "Class room managed by a teacher.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "teacherId": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "studentCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "teacherId"]
+    },
+    "Student": {
+      "title": "Student Account",
+      "description": "Student account with username and editable password.",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string" },
+        "password": { "type": "string" },
+        "fullName": { "type": "string" },
+        "classId": { "type": "string" },
+        "className": { "type": "string" },
+        "teacherId": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["username", "password", "fullName", "classId"]
+    },
+    "SystemSetting": {
+      "title": "System Settings",
+      "description": "Global application and Google Sheet synchronization settings.",
+      "type": "object",
+      "properties": {
+        "googleSheetUrl": { "type": "string" },
+        "teacherSheetUrl": { "type": "string" },
+        "allowTeacherRegistration": { "type": "boolean" },
+        "schoolName": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "firestore": {
+    "/questions_mcq/{id}": {
+      "schema": "QuestionMCQ",
+      "description": "Collection of multiple choice questions."
+    },
+    "/questions_tf/{id}": {
+      "schema": "QuestionTF",
+      "description": "Collection of true/false questions."
+    },
+    "/questions_sa/{id}": {
+      "schema": "QuestionSA",
+      "description": "Collection of short answer questions."
+    },
+    "/quiz_results/{id}": {
+      "schema": "QuizResult",
+      "description": "Collection of student quiz results."
+    },
+    "/teachers/{id}": {
+      "schema": "Teacher",
+      "description": "Collection of registered teachers."
+    },
+    "/classes/{id}": {
+      "schema": "Class",
+      "description": "Classes collection."
+    },
+    "/students/{id}": {
+      "schema": "Student",
+      "description": "Students collection."
+    },
+    "/settings/{id}": {
+      "schema": "SystemSetting",
+      "description": "System settings collection."
+    }
+  }
+}
