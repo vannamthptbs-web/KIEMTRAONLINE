@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { db, auth } from '../firebase';
 import { collection, getDocs, query, limit, addDoc, serverTimestamp, where } from 'firebase/firestore';
-import { MCQQuestion, TFQuestion, SAQuestion, StudentUser } from '../types';
+import { MCQQuestion, TFQuestion, SAQuestion, StudentUser, QuestionSet } from '../types';
 import { syncResultToSheet } from '../services/googleSheetSync';
 import { normalizeOnlineImageUrl } from '../services/excelService';
-import { ArrowLeft, CheckCircle2, Trophy, Timer, AlertCircle, User as UserIcon, Play, Lock, Sparkles } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Trophy, Timer, AlertCircle, User as UserIcon, Play, Lock, Sparkles, BookOpen } from 'lucide-react';
 import { motion } from 'motion/react';
 
 interface StudentQuizProps {
@@ -13,6 +13,8 @@ interface StudentQuizProps {
 }
 
 export const StudentQuiz: React.FC<StudentQuizProps> = ({ onBack, currentStudent }) => {
+  const [activeSet, setActiveSet] = useState<QuestionSet | null>(null);
+  const [noActiveSet, setNoActiveSet] = useState(false);
   const [mcqs, setMcqs] = useState<MCQQuestion[]>([]);
   const [tfs, setTfs] = useState<TFQuestion[]>([]);
   const [sas, setSas] = useState<SAQuestion[]>([]);
@@ -28,72 +30,117 @@ export const StudentQuiz: React.FC<StudentQuizProps> = ({ onBack, currentStudent
   const [selectedImagePreview, setSelectedImagePreview] = useState<string | null>(null);
 
   useEffect(() => {
-    const checkStatus = async () => {
+    const fetchActiveSetAndCheck = async () => {
       try {
-        if (currentStudent) {
-          setStudentName(currentStudent.fullName);
-          // Check by student username
-          const q = query(
-            collection(db, 'quiz_results'),
-            where('studentUsername', '==', currentStudent.username),
+        setLoading(true);
+        setCheckingStatus(true);
+        setNoActiveSet(false);
+        setHasTakenQuiz(false);
+
+        let chosenSet: QuestionSet | null = null;
+
+        // 1. Fetch active question set of this student's teacher
+        if (currentStudent?.teacherId) {
+          const qTeacher = query(
+            collection(db, 'question_sets'),
+            where('teacherId', '==', currentStudent.teacherId),
+            where('isActive', '==', true),
             limit(1)
           );
-          const snap = await getDocs(q);
-          if (!snap.empty) {
+          const snapTeacher = await getDocs(qTeacher);
+          if (!snapTeacher.empty) {
+            chosenSet = { id: snapTeacher.docs[0].id, ...snapTeacher.docs[0].data() } as QuestionSet;
+          }
+        }
+
+        // 2. If no active set found for specific teacher, fallback to any active set
+        if (!chosenSet) {
+          const qAny = query(
+            collection(db, 'question_sets'),
+            where('isActive', '==', true),
+            limit(1)
+          );
+          const snapAny = await getDocs(qAny);
+          if (!snapAny.empty) {
+            chosenSet = { id: snapAny.docs[0].id, ...snapAny.docs[0].data() } as QuestionSet;
+          }
+        }
+
+        // 3. Fallback: if no question_sets in database, check legacy collections
+        if (!chosenSet) {
+          const [mcqSnap, tfSnap, saSnap] = await Promise.all([
+            getDocs(query(collection(db, 'questions_mcq'), limit(16))),
+            getDocs(query(collection(db, 'questions_tf'), limit(4))),
+            getDocs(query(collection(db, 'questions_sa'), limit(4)))
+          ]);
+          const legacyMcqs = mcqSnap.docs.map(d => ({ id: d.id, ...d.data() } as MCQQuestion));
+          const legacyTfs = tfSnap.docs.map(d => ({ id: d.id, ...d.data() } as TFQuestion));
+          const legacySas = saSnap.docs.map(d => ({ id: d.id, ...d.data() } as SAQuestion));
+          const total = legacyMcqs.length + legacyTfs.length + legacySas.length;
+          if (total > 0) {
+            chosenSet = {
+              id: 'legacy_set_1',
+              title: 'Bộ câu hỏi 1 (Mặc định)',
+              teacherId: currentStudent?.teacherId || 'admin',
+              isActive: true,
+              mcqs: legacyMcqs,
+              tfs: legacyTfs,
+              sas: legacySas,
+              totalQuestions: total,
+              createdAt: new Date().toISOString()
+            };
+          }
+        }
+
+        if (!chosenSet || chosenSet.totalQuestions === 0) {
+          setNoActiveSet(true);
+          return;
+        }
+
+        setActiveSet(chosenSet);
+        setMcqs(chosenSet.mcqs || []);
+        setTfs(chosenSet.tfs || []);
+        setSas(chosenSet.sas || []);
+
+        // Check if student has taken this specific active set
+        if (currentStudent) {
+          setStudentName(currentStudent.fullName);
+          const qRes = query(
+            collection(db, 'quiz_results'),
+            where('studentUsername', '==', currentStudent.username),
+            where('setId', '==', chosenSet.id),
+            limit(1)
+          );
+          const resSnap = await getDocs(qRes);
+          if (!resSnap.empty) {
             setHasTakenQuiz(true);
-            setCheckingStatus(false);
             return;
           }
         }
 
-        if (auth.currentUser) {
-          if (!currentStudent) {
-            setStudentName(auth.currentUser.displayName || auth.currentUser.email || '');
-          }
-          const q = query(
-            collection(db, 'quiz_results'), 
+        if (auth.currentUser && !currentStudent) {
+          setStudentName(auth.currentUser.displayName || auth.currentUser.email || '');
+          const qRes = query(
+            collection(db, 'quiz_results'),
             where('userId', '==', auth.currentUser.uid),
+            where('setId', '==', chosenSet.id),
             limit(1)
           );
-          const snap = await getDocs(q);
-          if (!snap.empty) {
+          const resSnap = await getDocs(qRes);
+          if (!resSnap.empty) {
             setHasTakenQuiz(true);
           }
         }
-      } catch (e) {
-        console.error("Error checking quiz status:", e);
+      } catch (err) {
+        console.error('Error fetching active question set:', err);
       } finally {
+        setLoading(false);
         setCheckingStatus(false);
       }
     };
-    checkStatus();
+
+    fetchActiveSetAndCheck();
   }, [currentStudent]);
-
-  useEffect(() => {
-    const fetchQuestions = async () => {
-      try {
-        // Fetch 16 MCQ
-        const mcqSnap = await getDocs(query(collection(db, 'questions_mcq'), limit(50)));
-        const allMcqs = mcqSnap.docs.map(d => ({ id: d.id, ...d.data() } as MCQQuestion));
-        setMcqs(allMcqs.sort(() => Math.random() - 0.5).slice(0, 16));
-
-        // Fetch 4 TF
-        const tfSnap = await getDocs(query(collection(db, 'questions_tf'), limit(20)));
-        const allTfs = tfSnap.docs.map(d => ({ id: d.id, ...d.data() } as TFQuestion));
-        setTfs(allTfs.sort(() => Math.random() - 0.5).slice(0, 4));
-
-        // Fetch 4 SA
-        const saSnap = await getDocs(query(collection(db, 'questions_sa'), limit(20)));
-        const allSas = saSnap.docs.map(d => ({ id: d.id, ...d.data() } as SAQuestion));
-        setSas(allSas.sort(() => Math.random() - 0.5).slice(0, 4));
-      } catch (e) {
-        console.error(e);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchQuestions();
-  }, []);
 
   const allQuestions = [...mcqs, ...tfs, ...sas];
   const totalQuestions = allQuestions.length;
@@ -129,7 +176,9 @@ export const StudentQuiz: React.FC<StudentQuizProps> = ({ onBack, currentStudent
         studentId: currentStudent?.id || '',
         classId: currentStudent?.classId || '',
         className: currentStudent?.className || '',
-        teacherId: currentStudent?.teacherId || '',
+        teacherId: currentStudent?.teacherId || activeSet?.teacherId || '',
+        setId: activeSet?.id || 'default_set',
+        setTitle: activeSet?.title || 'Bộ câu hỏi 1',
         score: currentScore,
         total: totalQuestions,
         timestamp: serverTimestamp(),
@@ -151,15 +200,19 @@ export const StudentQuiz: React.FC<StudentQuizProps> = ({ onBack, currentStudent
     }
   };
 
-  if (loading || checkingStatus) {
+  if (noActiveSet || totalQuestions === 0) {
     return (
-      <div className="max-w-4xl mx-auto px-4 py-20 text-center">
-        <div className="animate-pulse space-y-4">
-          <div className="h-4 bg-zinc-200 rounded w-3/4 mx-auto"></div>
-          <div className="h-4 bg-zinc-200 rounded w-1/2 mx-auto"></div>
-          <div className="h-32 bg-zinc-200 rounded-2xl w-full"></div>
+      <div className="max-w-2xl mx-auto px-4 py-20 text-center">
+        <div className="w-20 h-20 bg-amber-100 rounded-3xl flex items-center justify-center mx-auto mb-6 text-amber-700 shadow-sm">
+          <AlertCircle className="w-10 h-10" />
         </div>
-        <p className="mt-8 text-zinc-500 font-medium">Đang kiểm tra trạng thái của bạn...</p>
+        <h3 className="text-2xl font-black text-zinc-900 mb-2">Chưa Có Bộ Câu Hỏi Được Kích Hoạt</h3>
+        <p className="text-zinc-600 mb-8 max-w-md mx-auto text-sm leading-relaxed">
+          Giáo viên phụ trách hiện chưa chọn bộ câu hỏi nào để học sinh làm bài. Em vui lòng liên hệ Thầy/Cô để được mở bộ câu hỏi nhé!
+        </p>
+        <button onClick={onBack} className="px-6 py-3 bg-zinc-900 hover:bg-zinc-800 text-white font-bold rounded-2xl transition-all shadow-md">
+          Quay lại cổng học sinh
+        </button>
       </div>
     );
   }
@@ -167,15 +220,17 @@ export const StudentQuiz: React.FC<StudentQuizProps> = ({ onBack, currentStudent
   if (hasTakenQuiz) {
     return (
       <div className="max-w-2xl mx-auto px-4 py-20 text-center">
-        <div className="w-20 h-20 bg-amber-100 rounded-2xl flex items-center justify-center mx-auto mb-8">
-          <Lock className="text-amber-600 w-10 h-10" />
+        <div className="w-20 h-20 bg-amber-100 rounded-3xl flex items-center justify-center mx-auto mb-6 text-amber-700 shadow-sm">
+          <Lock className="w-10 h-10" />
         </div>
-        <h3 className="text-3xl font-bold mb-4">Bạn đã làm bài rồi!</h3>
-        <p className="text-zinc-500 mb-8 text-lg">
-          Hệ thống ghi nhận bạn đã hoàn thành bài kiểm tra này. Mỗi học sinh chỉ được tham gia một lần duy nhất.
+        <h3 className="text-2xl font-black text-zinc-900 mb-2">
+          Em Đã Làm Bài Thi {activeSet?.title || 'Bộ Câu Hỏi Này'}!
+        </h3>
+        <p className="text-zinc-600 mb-8 max-w-md mx-auto text-sm leading-relaxed">
+          Hệ thống ghi nhận em đã hoàn thành bài kiểm tra của <strong>{activeSet?.title || 'bộ câu hỏi này'}</strong>. Mỗi học sinh chỉ được làm 1 lần duy nhất cho mỗi bộ đề được giáo viên chọn.
         </p>
-        <button onClick={onBack} className="px-8 py-4 bg-zinc-900 text-white rounded-2xl font-bold hover:bg-zinc-800 transition-all">
-          Quay lại trang chủ
+        <button onClick={onBack} className="px-8 py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-bold transition-all shadow-md">
+          Quay lại cổng học sinh
         </button>
       </div>
     );
@@ -192,8 +247,12 @@ export const StudentQuiz: React.FC<StudentQuizProps> = ({ onBack, currentStudent
           <div className="w-20 h-20 bg-emerald-100 rounded-2xl flex items-center justify-center mx-auto mb-8">
             <UserIcon className="text-emerald-600 w-10 h-10" />
           </div>
-          <h2 className="text-3xl font-bold mb-4">Thông Tin Thí Sinh</h2>
-          <p className="text-zinc-500 mb-8">Vui lòng nhập tên của bạn để bắt đầu bài kiểm tra.</p>
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-bold mb-3">
+            <BookOpen className="w-3.5 h-3.5" />
+            <span>{activeSet?.title || 'Bộ câu hỏi'}</span>
+          </div>
+          <h2 className="text-3xl font-bold mb-3">Thông Tin Thí Sinh</h2>
+          <p className="text-zinc-500 mb-8 text-sm">Vui lòng xác nhận họ tên của em để bắt đầu bài kiểm tra.</p>
           
           <div className="space-y-6">
             <div className="text-left">
@@ -213,7 +272,7 @@ export const StudentQuiz: React.FC<StudentQuizProps> = ({ onBack, currentStudent
               className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200 disabled:opacity-50 flex items-center justify-center gap-2"
             >
               <Play className="w-5 h-5" />
-              Bắt đầu làm bài
+              <span>Bắt đầu làm bài</span>
             </button>
             <button
               onClick={onBack}
@@ -227,18 +286,9 @@ export const StudentQuiz: React.FC<StudentQuizProps> = ({ onBack, currentStudent
     );
   }
 
-  if (totalQuestions === 0) {
-    return (
-      <div className="max-w-2xl mx-auto px-4 py-20 text-center">
-        <AlertCircle className="w-16 h-16 text-zinc-300 mx-auto mb-6" />
-        <h3 className="text-2xl font-bold mb-2">Chưa có câu hỏi nào</h3>
-        <p className="text-zinc-500 mb-8">Vui lòng liên hệ quản trị viên để thêm câu hỏi vào hệ thống.</p>
-        <button onClick={onBack} className="px-6 py-3 bg-zinc-900 text-white rounded-xl font-medium">Quay lại</button>
-      </div>
-    );
-  }
-
   if (isFinished) {
+    const ratio = totalQuestions > 0 ? score / totalQuestions : 0;
+    const score10 = (ratio * 10).toFixed(1);
     return (
       <div className="max-w-2xl mx-auto px-4 py-12">
         <motion.div
@@ -246,29 +296,33 @@ export const StudentQuiz: React.FC<StudentQuizProps> = ({ onBack, currentStudent
           animate={{ scale: 1, opacity: 1 }}
           className="bg-white p-12 rounded-3xl border border-zinc-200 shadow-xl text-center"
         >
-          <div className="w-24 h-24 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-8">
+          <div className="w-24 h-24 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-6">
             <Trophy className="text-emerald-600 w-12 h-12" />
           </div>
-          <h2 className="text-4xl font-bold mb-2">Hoàn Thành!</h2>
-          <p className="text-zinc-500 mb-8 text-lg">Bạn đã hoàn thành bài kiểm tra.</p>
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold mb-3">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+            <span>Đã nộp bài: {activeSet?.title || 'Bộ câu hỏi'}</span>
+          </div>
+          <h2 className="text-3xl sm:text-4xl font-bold mb-2 text-zinc-900">Hoàn Thành Bài Thi!</h2>
+          <p className="text-zinc-500 mb-8 text-sm">
+            Kết quả của em đã được lưu cố định và tự động chuyển đến Thầy/Cô.
+          </p>
           
-          <div className="bg-zinc-50 p-8 rounded-2xl border border-zinc-100 mb-12">
-            <div className="text-6xl font-black text-emerald-600 mb-2">{score}/{totalQuestions}</div>
-            <div className="text-zinc-400 font-medium uppercase tracking-widest text-sm">Điểm số của bạn</div>
+          <div className="bg-zinc-50 p-8 rounded-3xl border border-zinc-100 mb-8">
+            <div className="text-5xl sm:text-6xl font-black text-emerald-600 mb-2">
+              {score10} <span className="text-2xl sm:text-3xl font-bold text-zinc-400">/ 10</span>
+            </div>
+            <div className="text-zinc-500 font-semibold text-sm">
+              Đúng {score} / {totalQuestions} câu hỏi ({Math.round(ratio * 100)}%)
+            </div>
           </div>
 
           <div className="flex flex-col sm:flex-row gap-4">
             <button
-              onClick={() => window.location.reload()}
-              className="flex-1 py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200"
-            >
-              Làm lại bài mới
-            </button>
-            <button
               onClick={onBack}
-              className="flex-1 py-4 bg-zinc-100 text-zinc-900 rounded-2xl font-bold hover:bg-zinc-200 transition-all"
+              className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 transition-all shadow-md"
             >
-              Về trang chủ
+              Quay lại cổng học sinh
             </button>
           </div>
         </motion.div>
@@ -278,18 +332,35 @@ export const StudentQuiz: React.FC<StudentQuizProps> = ({ onBack, currentStudent
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-8">
-      <div className="flex items-center justify-between mb-8 sticky top-0 bg-zinc-50/80 backdrop-blur-md py-4 z-10 border-b border-zinc-200 -mx-4 px-4">
-        <button onClick={onBack} className="text-zinc-500 hover:text-zinc-900 transition-colors">
-          <ArrowLeft className="w-6 h-6" />
-        </button>
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2 px-4 py-2 bg-zinc-100 rounded-full text-sm font-bold text-zinc-600">
-            <Timer className="w-4 h-4" />
-            Tiến độ: {Object.keys(answers).length}/{totalQuestions}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-8 sticky top-0 bg-zinc-50/90 backdrop-blur-md py-4 z-10 border-b border-zinc-200 -mx-4 px-4">
+        <div className="flex items-center gap-3">
+          <button onClick={onBack} className="text-zinc-500 hover:text-zinc-900 transition-colors p-1 rounded-lg hover:bg-zinc-200">
+            <ArrowLeft className="w-5 h-5" />
+          </button>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-extrabold text-zinc-900 text-base sm:text-lg">
+                {activeSet?.title || 'Bộ Câu Hỏi Kiểm Tra'}
+              </span>
+              <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-100 text-emerald-800">
+                Đang làm
+              </span>
+            </div>
+            <p className="text-xs text-zinc-500">
+              Thí sinh: <strong>{currentStudent?.fullName || studentName}</strong>
+              {currentStudent?.className && ` • Lớp ${currentStudent.className}`}
+            </p>
           </div>
-          <div className="w-32 h-2 bg-zinc-100 rounded-full overflow-hidden">
+        </div>
+
+        <div className="flex items-center gap-3 self-end sm:self-auto">
+          <div className="flex items-center gap-2 px-3.5 py-1.5 bg-white border border-zinc-200 rounded-full text-xs font-bold text-zinc-700 shadow-2xs">
+            <Timer className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Tiến độ: {Object.keys(answers).length}/{totalQuestions} câu</span>
+          </div>
+          <div className="w-24 sm:w-32 h-2.5 bg-zinc-200 rounded-full overflow-hidden">
             <div 
-              className="h-full bg-emerald-500 transition-all duration-500" 
+              className="h-full bg-emerald-600 transition-all duration-300" 
               style={{ width: `${(Object.keys(answers).length / totalQuestions) * 100}%` }}
             />
           </div>

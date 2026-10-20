@@ -39,6 +39,21 @@ export interface QuizState {
   isFinished: boolean;
 }
 
+export interface QuestionSet {
+  id: string;
+  title: string; // "Bộ câu hỏi 1", "Bộ câu hỏi 2", etc.
+  description?: string;
+  teacherId: string;
+  teacherName?: string;
+  isActive: boolean; // Gv muốn HS làm bộ câu hỏi nào thì chọn bộ đó
+  mcqs: MCQQuestion[];
+  tfs: TFQuestion[];
+  sas: SAQuestion[];
+  totalQuestions: number;
+  createdAt: string;
+  updatedAt?: string;
+}
+
 export interface QuizResult {
   id?: string;
   studentName: string;
@@ -49,6 +64,8 @@ export interface QuizResult {
   teacherId?: string;
   score: number;
   total: number;
+  setId?: string; // ID của bộ câu hỏi
+  setTitle?: string; // Tên bộ câu hỏi: "Bộ câu hỏi 1", "Bộ câu hỏi 2"...
   timestamp: any;
   userId?: string | null;
 }

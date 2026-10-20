@@ -123,9 +123,29 @@
         "schoolName": { "type": "string" },
         "updatedAt": { "type": "string", "format": "date-time" }
       }
+    },
+    "QuestionSet": {
+      "title": "Question Set",
+      "description": "A set of questions (Bộ câu hỏi 1, 2, 3...) that a teacher creates and selects for students to take.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "teacherId": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "totalQuestions": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "teacherId", "isActive"]
     }
   },
   "firestore": {
+    "/question_sets/{id}": {
+      "schema": "QuestionSet",
+      "description": "Collection of question sets (Bộ câu hỏi 1, 2, 3...)."
+    },
     "/questions_mcq/{id}": {
       "schema": "QuestionMCQ",
       "description": "Collection of multiple choice questions."

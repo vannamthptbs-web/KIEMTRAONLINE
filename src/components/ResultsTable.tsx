@@ -15,6 +15,7 @@ import {
   Sparkles,
   ChevronLeft,
   ChevronRight,
+  BookOpen,
   X
 } from 'lucide-react';
 
@@ -168,7 +169,7 @@ export const ResultsTable: React.FC<ResultsTableProps> = ({ results }) => {
   const handleExportCSV = () => {
     if (filteredAndSortedResults.length === 0) return;
 
-    const headers = ['STT', 'Họ và tên', 'Điểm đạt', 'Tổng số câu', 'Thang điểm 10', 'Tỷ lệ %', 'Thời gian nộp'];
+    const headers = ['STT', 'Họ và tên', 'Bộ câu hỏi', 'Điểm đạt', 'Tổng số câu', 'Thang điểm 10', 'Tỷ lệ %', 'Thời gian nộp'];
     const rows = filteredAndSortedResults.map((r, i) => {
       const date = getDateFromTimestamp(r.timestamp);
       const dateStr = date ? date.toLocaleString('vi-VN') : 'Không rõ';
@@ -177,6 +178,7 @@ export const ResultsTable: React.FC<ResultsTableProps> = ({ results }) => {
       return [
         i + 1,
         `"${(r.studentName || 'Ẩn danh').replace(/"/g, '""')}"`,
+        `"${(r.setTitle || 'Bộ câu hỏi 1').replace(/"/g, '""')}"`,
         r.score,
         r.total,
         score10,
@@ -455,6 +457,7 @@ export const ResultsTable: React.FC<ResultsTableProps> = ({ results }) => {
                 <tr className="bg-zinc-50/80 border-b border-zinc-100 text-xs font-bold text-zinc-500 uppercase tracking-wider">
                   <th className="px-5 py-3.5 w-16 text-center">Hạng</th>
                   <th className="px-6 py-3.5">Học sinh</th>
+                  <th className="px-6 py-3.5">Bộ đề làm bài</th>
                   <th className="px-6 py-3.5">Điểm số (Thang 10)</th>
                   <th className="px-6 py-3.5">Số câu đúng</th>
                   <th className="px-6 py-3.5">Thời gian nộp</th>
@@ -527,6 +530,14 @@ export const ResultsTable: React.FC<ResultsTableProps> = ({ results }) => {
                             </div>
                           </div>
                         </div>
+                      </td>
+
+                      {/* Question set badge */}
+                      <td className="px-6 py-4">
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-indigo-50 border border-indigo-100 text-indigo-700 text-xs font-bold whitespace-nowrap">
+                          <BookOpen className="w-3.5 h-3.5 text-indigo-600" />
+                          <span>{res.setTitle || 'Bộ câu hỏi 1'}</span>
+                        </span>
                       </td>
 
                       {/* 10-point scale badge */}

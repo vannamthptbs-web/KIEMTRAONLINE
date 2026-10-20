@@ -170,10 +170,22 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
               <div className="bg-white border border-zinc-200 rounded-2xl p-4 sm:p-5 shadow-xs space-y-2">
                 <div className="flex items-center gap-2 text-indigo-700 font-black text-sm uppercase tracking-wide">
                   <span className="w-6 h-6 rounded-lg bg-indigo-100 flex items-center justify-center text-xs">3</span>
-                  <h4>Tải Đề Thi & Chèn Ảnh Cho Câu Hỏi (Lưu về Google Drive)</h4>
+                  <h4>Quản Lý Các Bộ Câu Hỏi (Bộ 1, 2, 3...) & Chèn Ảnh (Lưu Google Drive)</h4>
                 </div>
                 <ul className="list-disc list-inside space-y-1.5 text-xs text-zinc-600 pl-1 leading-relaxed">
                   <li>Vào tab <strong>"Câu Hỏi & Excel"</strong>.</li>
+                  <li className="text-indigo-900 font-semibold bg-indigo-50 p-2.5 rounded-xl border border-indigo-200">
+                    📚 <strong>Tự động lưu thành Bộ câu hỏi 1, 2, 3...:</strong>
+                    <p className="font-normal text-xs text-indigo-950 mt-1">
+                      Mỗi lần Thầy/Cô tải file Excel lên sẽ tự động lưu lại thành 1 bộ câu hỏi riêng biệt (<strong>Bộ câu hỏi 1, Bộ câu hỏi 2, Bộ câu hỏi 3...</strong>). Thầy/Cô có thể đặt tên riêng hoặc bấm <strong>"Đổi tên"</strong> bất kỳ lúc nào.
+                    </p>
+                  </li>
+                  <li className="text-emerald-900 font-semibold bg-emerald-50 p-2.5 rounded-xl border border-emerald-200">
+                    🎯 <strong>Chọn bộ câu hỏi cho học sinh làm bài:</strong>
+                    <p className="font-normal text-xs text-emerald-950 mt-1">
+                      Thầy/Cô muốn học sinh làm bài nào thì chỉ cần bấm nút <strong>"Chọn Bộ Này Cho HS Làm"</strong> tại bộ câu hỏi đó. <strong>Học sinh khi đăng nhập sẽ CHỈ nhìn thấy và làm đúng bộ câu hỏi do Thầy/Cô đã chọn!</strong>
+                    </p>
+                  </li>
                   <li>Bấm <strong>"Tải File Excel Mẫu (.xlsx)"</strong> để lấy file mẫu chuẩn của Bộ GD&ĐT gồm 3 phần:
                     <ul className="list-circle list-inside pl-4 mt-1 space-y-1 text-zinc-500">
                       <li><strong>Sheet MCQ (Trắc nghiệm):</strong> 4 lựa chọn A, B, C, D (1 đáp án đúng).</li>
@@ -181,15 +193,15 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
                       <li><strong>Sheet SA (Trả lời ngắn):</strong> Câu hỏi yêu cầu học sinh tự điền đáp án ngắn.</li>
                     </ul>
                   </li>
-                  <li>Sau khi soạn xong đề trên file Excel, bấm <strong>"Chọn File Excel Để Tải Lên"</strong>. Hệ thống sẽ tự động nạp câu hỏi và tự động đồng bộ lên Google Sheet (Sheet <code>NganHang_CauHoi</code>).</li>
-                  <li className="text-emerald-800 font-semibold bg-emerald-50 p-2.5 rounded-xl border border-emerald-200 mt-2">
+                  <li>Bấm <strong>"Chọn File Excel Để Tải Lên"</strong> để nạp đề. Hệ thống sẽ tự động lưu bộ câu hỏi và đồng bộ lên Google Sheet (Sheet <code>NganHang_CauHoi</code>).</li>
+                  <li className="text-purple-900 font-semibold bg-purple-50 p-2.5 rounded-xl border border-purple-200 mt-2">
                     🖼️ <strong>Chèn ảnh cho câu hỏi (Tự động lưu về Google Drive):</strong>
-                    <p className="font-normal text-xs text-emerald-900 mt-1">
-                      Trong danh sách câu hỏi đang hoạt động trực tuyến, mỗi câu hỏi đều có nút màu xanh <strong>"Chèn Ảnh Cho Câu Hỏi (Lưu vào Drive)"</strong>. Thầy/Cô chỉ cần bấm vào, chọn ảnh sơ đồ/hình vẽ từ máy tính — hệ thống sẽ tự động nén nhẹ ảnh, tải lên thư mục Google Drive cố định: <a href={DEFAULT_DRIVE_FOLDER_URL} target="_blank" rel="noopener noreferrer" className="font-mono underline font-bold">{DEFAULT_DRIVE_FOLDER_URL}</a> và cập nhật đường link để học sinh xem trực tuyến khi làm bài!
+                    <p className="font-normal text-xs text-purple-950 mt-1">
+                      Bấm <strong>"Xem & Chèn ảnh"</strong> ở bộ câu hỏi tương ứng, sau đó bấm nút màu xanh <strong>"Chèn Ảnh Cho Câu Hỏi (Lưu vào Drive)"</strong> để chọn ảnh sơ đồ/hình vẽ từ máy tính — hệ thống sẽ tự động nén nhẹ ảnh, tải lên thư mục Google Drive cố định: <a href={DEFAULT_DRIVE_FOLDER_URL} target="_blank" rel="noopener noreferrer" className="font-mono underline font-bold">{DEFAULT_DRIVE_FOLDER_URL}</a> và cập nhật đường link để học sinh xem khi làm bài!
                     </p>
                   </li>
                   <li>
-                    <strong>Xóa câu hỏi:</strong> Thầy/Cô có thể bấm biểu tượng <strong>Thùng rác</strong> ở từng câu hỏi để xóa khỏi ngân hàng đề.
+                    <strong>Xóa bộ câu hỏi hoặc xóa từng câu:</strong> Thầy/Cô có thể bấm nút <strong>"Xóa bộ này"</strong> hoặc bấm icon <strong>Thùng rác</strong> ở từng câu hỏi khi cần làm mới ngân hàng đề.
                   </li>
                 </ul>
               </div>
@@ -264,6 +276,9 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
                 <ul className="list-disc list-inside space-y-1.5 text-xs text-zinc-600 pl-1 leading-relaxed">
                   <li>Sau khi đăng nhập thành công, em sẽ vào <strong>Cổng thông tin học sinh</strong>.</li>
                   <li>Kiểm tra thông tin cá nhân: Họ và tên, Lớp, Giáo viên phụ trách.</li>
+                  <li className="text-emerald-900 font-semibold bg-emerald-50 p-2 rounded-xl border border-emerald-200">
+                    📖 <strong>Bộ câu hỏi do Giáo viên chỉ định:</strong> Em sẽ <strong>CHỈ nhìn thấy bộ câu hỏi</strong> mà Thầy/Cô phụ trách đã chọn mở cho học sinh (ví dụ: <em>Bộ câu hỏi 1</em>). Mỗi học sinh chỉ được làm 1 lần duy nhất cho mỗi bộ đề. Khi Thầy/Cô kích hoạt bộ đề tiếp theo (ví dụ: <em>Bộ câu hỏi 2</em>), bài thi mới sẽ xuất hiện để em tiếp tục làm!
+                  </li>
                   <li>
                     <strong className="text-emerald-800">Đổi mật khẩu:</strong> Để bảo mật tài khoản và tránh người khác làm bài hộ mình, em nên bấm nút <strong>"Đổi Mật Khẩu"</strong>, nhập mật khẩu mới và bấm xác nhận. Mật khẩu mới sẽ được cập nhật tự động lên hệ thống và gửi đến file Google Sheet của Thầy/Cô.
                   </li>

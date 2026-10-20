@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../firebase';
 import { collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore';
-import { StudentUser, QuizResult } from '../types';
+import { StudentUser, QuizResult, QuestionSet, MCQQuestion, TFQuestion, SAQuestion } from '../types';
 import { ChangePasswordModal } from './StudentAuthModal';
 import { UserGuideModal } from './UserGuideModal';
 import { 
@@ -33,46 +33,97 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({
 }) => {
   const [showChangePass, setShowChangePass] = useState(false);
   const [showGuideModal, setShowGuideModal] = useState(false);
+  const [activeSet, setActiveSet] = useState<QuestionSet | null>(null);
   const [studentResult, setStudentResult] = useState<QuizResult | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Fetch only this student's result
+  // Fetch active question set for this student's teacher & check if taken
   useEffect(() => {
-    const fetchStudentResult = async () => {
+    const fetchActiveSetAndResult = async () => {
       try {
         setLoading(true);
-        // Check by studentId or username
-        const q = query(
-          collection(db, 'quiz_results'),
-          where('studentUsername', '==', student.username),
-          orderBy('timestamp', 'desc'),
-          limit(1)
-        );
-        const snap = await getDocs(q);
+        let chosenSet: QuestionSet | null = null;
 
-        if (!snap.empty) {
-          const docData = snap.docs[0].data();
-          setStudentResult({ id: snap.docs[0].id, ...docData } as QuizResult);
-        } else {
-          // Fallback check by studentName and className if username not yet tagged
-          const q2 = query(
-            collection(db, 'quiz_results'),
-            where('studentName', '==', student.fullName),
+        // 1. Fetch active question set of this student's teacher
+        if (student.teacherId) {
+          const qTeacher = query(
+            collection(db, 'question_sets'),
+            where('teacherId', '==', student.teacherId),
+            where('isActive', '==', true),
             limit(1)
           );
-          const snap2 = await getDocs(q2);
-          if (!snap2.empty) {
-            setStudentResult({ id: snap2.docs[0].id, ...snap2.docs[0].data() } as QuizResult);
+          const snapTeacher = await getDocs(qTeacher);
+          if (!snapTeacher.empty) {
+            chosenSet = { id: snapTeacher.docs[0].id, ...snapTeacher.docs[0].data() } as QuestionSet;
           }
         }
+
+        // 2. Fallback to any active set
+        if (!chosenSet) {
+          const qAny = query(
+            collection(db, 'question_sets'),
+            where('isActive', '==', true),
+            limit(1)
+          );
+          const snapAny = await getDocs(qAny);
+          if (!snapAny.empty) {
+            chosenSet = { id: snapAny.docs[0].id, ...snapAny.docs[0].data() } as QuestionSet;
+          }
+        }
+
+        // 3. Fallback: check legacy questions
+        if (!chosenSet) {
+          const [mcqSnap, tfSnap, saSnap] = await Promise.all([
+            getDocs(query(collection(db, 'questions_mcq'), limit(16))),
+            getDocs(query(collection(db, 'questions_tf'), limit(4))),
+            getDocs(query(collection(db, 'questions_sa'), limit(4)))
+          ]);
+          const legacyMcqs = mcqSnap.docs.map(d => ({ id: d.id, ...d.data() } as MCQQuestion));
+          const legacyTfs = tfSnap.docs.map(d => ({ id: d.id, ...d.data() } as TFQuestion));
+          const legacySas = saSnap.docs.map(d => ({ id: d.id, ...d.data() } as SAQuestion));
+          const total = legacyMcqs.length + legacyTfs.length + legacySas.length;
+          if (total > 0) {
+            chosenSet = {
+              id: 'legacy_set_1',
+              title: 'Bộ câu hỏi 1 (Mặc định)',
+              teacherId: student.teacherId || 'admin',
+              isActive: true,
+              mcqs: legacyMcqs,
+              tfs: legacyTfs,
+              sas: legacySas,
+              totalQuestions: total,
+              createdAt: new Date().toISOString()
+            };
+          }
+        }
+
+        setActiveSet(chosenSet);
+
+        // If an active set exists, check if student completed THIS set
+        if (chosenSet) {
+          const qRes = query(
+            collection(db, 'quiz_results'),
+            where('studentUsername', '==', student.username),
+            where('setId', '==', chosenSet.id),
+            limit(1)
+          );
+          const snapRes = await getDocs(qRes);
+          if (!snapRes.empty) {
+            setStudentResult({ id: snapRes.docs[0].id, ...snapRes.docs[0].data() } as QuizResult);
+          } else {
+            setStudentResult(null);
+          }
+        } else {
+          setStudentResult(null);
+        }
       } catch (err) {
-        console.error('Error fetching student result:', err);
+        console.error('Error fetching student portal data:', err);
       } finally {
         setLoading(false);
       }
     };
 
-    fetchStudentResult();
+    fetchActiveSetAndResult();
   }, [student]);
 
   const hasTaken = Boolean(studentResult);
@@ -152,10 +203,28 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({
       {loading ? (
         <div className="bg-white rounded-3xl border border-zinc-200 p-12 text-center">
           <div className="w-10 h-10 border-3 border-emerald-600 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-zinc-500 font-medium text-sm">Đang kiểm tra trạng thái bài kiểm tra...</p>
+          <p className="text-zinc-500 font-medium text-sm">Đang kiểm tra bộ câu hỏi của giáo viên...</p>
         </div>
+      ) : !activeSet || activeSet.totalQuestions === 0 ? (
+        /* Case 0: Teacher has not selected/activated any question set */
+        <motion.div
+          initial={{ opacity: 0, y: 15 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-white rounded-3xl border border-zinc-200 shadow-sm p-8 sm:p-12 text-center"
+        >
+          <div className="w-16 h-16 bg-amber-100 rounded-3xl flex items-center justify-center mx-auto mb-4 text-amber-600">
+            <AlertCircle className="w-8 h-8" />
+          </div>
+          <h3 className="text-xl font-bold text-zinc-900 mb-2">Chưa Có Bộ Câu Hỏi Nào Được Mở</h3>
+          <p className="text-zinc-500 text-sm max-w-md mx-auto leading-relaxed mb-4">
+            Thầy/Cô hiện chưa chọn bộ câu hỏi nào để học sinh làm bài. Khi Thầy/Cô kích hoạt bộ câu hỏi mới, bài thi sẽ tự động xuất hiện tại đây để em làm bài.
+          </p>
+          <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-zinc-100 text-zinc-600 text-xs font-semibold">
+            <span>Học sinh: {student.fullName} (Lớp {student.className})</span>
+          </div>
+        </motion.div>
       ) : hasTaken ? (
-        /* Case 1: Student has already completed the quiz */
+        /* Case 1: Student has already completed THIS active question set */
         <motion.div
           initial={{ opacity: 0, scale: 0.98 }}
           animate={{ opacity: 1, scale: 1 }}
@@ -165,8 +234,12 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({
             <div className="w-20 h-20 bg-white/10 rounded-full flex items-center justify-center mx-auto mb-4 backdrop-blur-xs">
               <CheckCircle2 className="w-10 h-10 text-emerald-200" />
             </div>
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/30 text-white text-xs font-bold mb-2">
+              <BookOpen className="w-3.5 h-3.5" />
+              <span>{activeSet.title}</span>
+            </div>
             <h2 className="text-2xl sm:text-3xl font-bold tracking-tight mb-2">
-              Em Đã Hoàn Thành Bài Kiểm Tra!
+              Em Đã Hoàn Thành {activeSet.title}!
             </h2>
             <p className="text-emerald-100 text-sm max-w-md mx-auto">
               Hệ thống đã ghi nhận kết quả và lưu cố định vào danh sách điểm của giáo viên.
@@ -177,7 +250,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({
             <div className="bg-zinc-50 rounded-2xl p-6 border border-zinc-200/80 mb-6">
               <div className="text-center mb-6">
                 <span className="text-xs font-bold text-zinc-400 uppercase tracking-widest block mb-1">
-                  KẾT QUẢ CỦA EM
+                  KẾT QUẢ: {activeSet.title}
                 </span>
                 <div className="flex items-center justify-center gap-3">
                   <span className={`text-5xl font-black ${
@@ -212,13 +285,13 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({
             <div className="p-4 bg-amber-50 border border-amber-200 text-amber-900 rounded-2xl text-sm flex items-start gap-3">
               <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
               <div>
-                <strong>Quy định làm bài:</strong> Mỗi học sinh chỉ được làm bài <strong>1 lần duy nhất</strong>. Kết quả bài thi của em đã được gửi trực tiếp cho giáo viên bộ môn.
+                <strong>Quy định làm bài:</strong> Mỗi học sinh chỉ được làm bài <strong>1 lần duy nhất</strong> cho mỗi bộ đề. Khi Thầy/Cô mở bộ câu hỏi tiếp theo, em sẽ được làm bộ đề mới.
               </div>
             </div>
           </div>
         </motion.div>
       ) : (
-        /* Case 2: Student has not taken the quiz yet */
+        /* Case 2: Student has not taken THIS active question set yet */
         <motion.div
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
@@ -229,16 +302,24 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({
               <FileText className="w-7 h-7" />
             </div>
             <div>
-              <h2 className="text-2xl font-bold text-zinc-900">Bài Kiểm Tra Trắc Nghiệm</h2>
-              <p className="text-zinc-500 text-sm">Kiểm tra định kỳ kiến thức môn học</p>
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold mb-1">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Bộ câu hỏi do GV chỉ định</span>
+              </div>
+              <h2 className="text-2xl font-bold text-zinc-900">{activeSet.title}</h2>
+              <p className="text-zinc-500 text-sm">
+                {activeSet.description || 'Đề kiểm tra trắc nghiệm kiến thức môn học'}
+              </p>
             </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
             <div className="p-4 bg-zinc-50 rounded-2xl border border-zinc-100 text-center">
               <span className="text-xs text-zinc-400 font-semibold block uppercase">Cấu trúc đề</span>
-              <span className="text-xl font-bold text-zinc-800">24 câu hỏi</span>
-              <span className="text-xs text-zinc-500 block mt-0.5">16 MCQ • 4 Đ/S • 4 TLN</span>
+              <span className="text-xl font-bold text-zinc-800">{activeSet.totalQuestions} câu hỏi</span>
+              <span className="text-xs text-zinc-500 block mt-0.5">
+                {activeSet.mcqs?.length || 0} MCQ • {activeSet.tfs?.length || 0} Đ/S • {activeSet.sas?.length || 0} TLN
+              </span>
             </div>
 
             <div className="p-4 bg-zinc-50 rounded-2xl border border-zinc-100 text-center">
@@ -259,7 +340,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({
               <AlertCircle className="w-4 h-4 text-blue-600" /> Lưu ý quan trọng trước khi bắt đầu:
             </div>
             <ul className="list-disc list-inside space-y-1 text-xs text-blue-800 ml-1">
-              <li>Mỗi học sinh chỉ được làm bài 1 lần, hãy chuẩn bị giấy nháp và không gian yên tĩnh.</li>
+              <li>Mỗi học sinh chỉ được làm bài 1 lần cho bộ đề này, hãy chuẩn bị giấy nháp và không gian yên tĩnh.</li>
               <li>Sau khi hoàn thành, hãy nhấn nút <strong>"Nộp bài"</strong> để hệ thống chấm điểm và lưu kết quả.</li>
               <li>Chỉ giáo viên và chính em mới có thể xem kết quả bài kiểm tra này.</li>
             </ul>
@@ -270,7 +351,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({
             className="w-full py-4 px-6 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 active:scale-98 text-white font-bold text-lg rounded-2xl shadow-lg transition-all flex items-center justify-center gap-3 group"
           >
             <Play className="w-6 h-6 group-hover:scale-110 transition-transform fill-white" />
-            <span>Bắt Đầu Làm Bài Kiểm Tra</span>
+            <span>Bắt Đầu Làm: {activeSet.title}</span>
           </button>
         </motion.div>
       )}

@@ -14,6 +14,11 @@ service cloud.firestore {
       );
     }
 
+    // Question Sets (Bộ câu hỏi 1, 2, 3...)
+    match /question_sets/{id} {
+      allow read, write: if true;
+    }
+
     // Questions: Anyone can read, teachers and admins can manage
     match /questions_mcq/{id} {
       allow read: if true;

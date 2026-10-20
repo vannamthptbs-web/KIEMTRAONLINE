@@ -497,9 +497,11 @@ export async function syncQuestionsToSheet(
     text: string;
     imageUrl?: string;
     details?: any;
+    setName?: string;
   }>,
   teacherId?: string,
-  customUrl?: string
+  customUrl?: string,
+  defaultSetName?: string
 ): Promise<boolean> {
   let targetUrl = customUrl;
   if (!targetUrl && teacherId && teacherId !== 'admin_user' && teacherId !== 'admin_fixed_user') {
@@ -536,6 +538,7 @@ export async function syncQuestionsToSheet(
 
     return {
       id: q.id,
+      setName: q.setName || defaultSetName || 'Bộ câu hỏi 1',
       type: q.type,
       typeLabel,
       text: q.text,
