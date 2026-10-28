@@ -203,7 +203,7 @@ export default function App() {
                   )}
                 </div>
                 <p className="text-zinc-500 text-sm mb-6 leading-relaxed">
-                  Đăng nhập tài khoản Admin (admin/admin123) hoặc tài khoản Giáo viên để quản lý lớp, cấp tài khoản học sinh và tải câu hỏi Excel.
+                  Đăng nhập tài khoản Quản trị viên (Admin) hoặc tài khoản Giáo viên để quản lý lớp, cấp tài khoản học sinh và tải câu hỏi Excel.
                 </p>
                 <div className="inline-flex items-center gap-2 text-sm font-bold text-indigo-600 group-hover:translate-x-1 transition-transform">
                   <span>{(user || teacherUser) ? 'Vào bảng điều khiển' : 'Đăng nhập Admin / Giáo viên'}</span>

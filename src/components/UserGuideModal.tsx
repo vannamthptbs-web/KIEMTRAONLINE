@@ -352,14 +352,13 @@ export const UserGuideModal: React.FC<UserGuideModalProps> = ({
               {/* Admin Credential */}
               <div className="bg-zinc-900 text-zinc-100 rounded-2xl p-4 font-mono text-xs space-y-2 border border-zinc-800">
                 <div className="text-emerald-400 font-bold uppercase tracking-wider text-[11px]">
-                  Tài khoản Admin quản trị hệ thống mặc định:
+                  Tài khoản Quản trị viên (Admin) hệ thống:
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                  <div>Tên đăng nhập: <code className="bg-zinc-800 text-amber-300 px-2 py-0.5 rounded font-bold">admin</code></div>
-                  <div>Mật khẩu: <code className="bg-zinc-800 text-amber-300 px-2 py-0.5 rounded font-bold">admin123</code></div>
+                <div className="text-xs text-zinc-300">
+                  Tài khoản Quản trị viên được bảo mật riêng dành cho Thầy/Cô quản lý hệ thống.
                 </div>
                 <div className="text-[11px] text-zinc-400 pt-1">
-                  (Hoặc đăng nhập bằng tài khoản Google chính: <code className="text-indigo-300">vannamthptbs@gmail.com</code>)
+                  (Đăng nhập nhanh an toàn bằng tài khoản Google chính: <code className="text-indigo-300">vannamthptbs@gmail.com</code>)
                 </div>
               </div>
 

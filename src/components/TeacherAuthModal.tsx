@@ -153,6 +153,7 @@ export const TeacherAuthModal: React.FC<TeacherAuthModalProps> = ({
   // Handle Google Login for Admin / Teacher
   const handleGoogleLogin = async () => {
     try {
+      setLoginError('');
       setLoginLoading(true);
       const res = await loginWithGoogle();
       const email = res.user.email || '';
@@ -171,8 +172,22 @@ export const TeacherAuthModal: React.FC<TeacherAuthModalProps> = ({
       onLoginSuccess(teacherUser);
       onClose();
     } catch (err: any) {
-      console.error('Google login error:', err);
-      setLoginError('Lỗi đăng nhập Google: ' + err.message);
+      const code = err?.code || '';
+      const message = err?.message || '';
+      if (
+        code === 'auth/popup-closed-by-user' ||
+        code === 'auth/cancelled-popup-request' ||
+        message.includes('auth/popup-closed-by-user') ||
+        message.includes('auth/cancelled-popup-request')
+      ) {
+        setLoginError('Đã đóng cửa sổ đăng nhập Google. Thầy/Cô có thể đăng nhập bằng Tên đăng nhập & Mật khẩu ở trên hoặc bấm thử lại.');
+      } else if (code === 'auth/popup-blocked' || message.includes('auth/popup-blocked')) {
+        setLoginError('Trình duyệt đã chặn cửa sổ bật lên (Popup). Vui lòng cho phép Popup hoặc đăng nhập bằng Tên đăng nhập & Mật khẩu ở trên.');
+      } else if (code === 'auth/unauthorized-domain' || message.includes('auth/unauthorized-domain')) {
+        setLoginError('Tên miền hiện tại chưa được cấp phép đăng nhập Google. Vui lòng đăng nhập bằng Tên đăng nhập & Mật khẩu ở trên.');
+      } else {
+        setLoginError('Không thể đăng nhập bằng Google lúc này. Vui lòng đăng nhập bằng Tên đăng nhập & Mật khẩu ở trên.');
+      }
     } finally {
       setLoginLoading(false);
     }
@@ -370,23 +385,6 @@ export const TeacherAuthModal: React.FC<TeacherAuthModalProps> = ({
               </svg>
               <span>Đăng nhập nhanh với Google</span>
             </button>
-
-            <div className="pt-2 text-center text-xs text-zinc-500 bg-zinc-50 p-3 rounded-xl border border-zinc-200/80 space-y-2">
-              <div>
-                💡 <strong>Tài khoản Admin hệ thống:</strong> Tên: <code className="bg-white px-1.5 py-0.5 rounded border border-zinc-200 font-bold text-zinc-800">admin</code> • Mật khẩu: <code className="bg-white px-1.5 py-0.5 rounded border border-zinc-200 font-bold text-zinc-800">admin123</code>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setLoginUsername('admin');
-                  setLoginPassword('admin123');
-                }}
-                className="w-full py-1.5 px-3 bg-purple-50 hover:bg-purple-100 text-purple-700 font-bold rounded-lg text-xs transition-colors flex items-center justify-center gap-1.5"
-              >
-                <ShieldCheck className="w-3.5 h-3.5" />
-                <span>Điền nhanh thông tin Admin (admin / admin123)</span>
-              </button>
-            </div>
           </form>
         )}
 

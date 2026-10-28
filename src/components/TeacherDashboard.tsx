@@ -7,6 +7,7 @@ import {
   addDoc, 
   deleteDoc, 
   doc, 
+  setDoc,
   updateDoc, 
   query, 
   where, 
@@ -21,17 +22,21 @@ import {
   SAQuestion,
   SystemSettings,
   TeacherUser,
-  QuestionSet
+  QuestionSet,
+  SUBJECT_LIST
 } from '../types';
 import { 
   downloadQuestionTemplate, 
+  downloadWordTemplate,
   downloadStudentTemplate, 
   exportStudentsToExcel, 
   exportClassResultsToExcel, 
   parseQuestionsFromExcel, 
+  parseQuestionsFromAnyFile,
   parseStudentsFromExcel,
   generateStudentUsername,
-  normalizeOnlineImageUrl
+  normalizeOnlineImageUrl,
+  PRESET_QUESTION_SETS
 } from '../services/excelService';
 import { 
   getSystemSettings, 
@@ -133,6 +138,18 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
   const [editingSetTitleText, setEditingSetTitleText] = useState<string>('');
   const [targetSetForNewQ, setTargetSetForNewQ] = useState<string>('');
   const [resultFilterSet, setResultFilterSet] = useState<string>('all');
+  const [showAddSetModal, setShowAddSetModal] = useState<boolean>(false);
+  const [importTargetSetId, setImportTargetSetId] = useState<string | null>(null);
+  const [addSetMode, setAddSetMode] = useState<'preset' | 'bank' | 'upload'>('upload');
+  const [selectedSubject, setSelectedSubject] = useState<string>('');
+  const [customSubjectInput, setCustomSubjectInput] = useState<string>('');
+  const [selectedBankQuestionIds, setSelectedBankQuestionIds] = useState<string[]>([]);
+  const [bankFilterType, setBankFilterType] = useState<'all' | 'mcq' | 'tf' | 'sa'>('all');
+  const [bankFilterSubject, setBankFilterSubject] = useState<string>('all');
+  const [bankSearchKeyword, setBankSearchKeyword] = useState<string>('');
+  const [presetFilterSubject, setPresetFilterSubject] = useState<string>('all');
+  const [creatingSetLoading, setCreatingSetLoading] = useState<boolean>(false);
+  const [newQSubject, setNewQSubject] = useState<string>('Tin học');
 
   // Questions with Image & Online Question Builder State
   const [showAddQuestionModal, setShowAddQuestionModal] = useState(false);
@@ -234,55 +251,94 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
   const fetchQuestionSets = async () => {
     try {
       setLoadingSets(true);
-      let q;
-      if (isAdmin) {
-        q = query(collection(db, 'question_sets'), orderBy('createdAt', 'desc'));
-      } else {
-        q = query(
-          collection(db, 'question_sets'),
-          where('teacherId', '==', effectiveTeacherId),
-          orderBy('createdAt', 'desc')
-        );
-      }
-      const snap = await getDocs(q);
-      let sets: QuestionSet[] = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) } as QuestionSet));
+      const q = isAdmin
+        ? collection(db, 'question_sets')
+        : query(
+            collection(db, 'question_sets'),
+            where('teacherId', '==', effectiveTeacherId)
+          );
 
-      // Auto-migrate legacy questions into "Bộ câu hỏi 1 (Mặc định)" if no sets exist yet
+      const snap = await getDocs(q);
+      let sets: QuestionSet[] = snap.docs
+        .map(d => ({ id: d.id, ...(d.data() as any) } as QuestionSet))
+        .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+
+      // Read teacher's saved activeSetId from teachers/{effectiveTeacherId}
+      let savedTeacherActiveSetId: string | undefined = undefined;
+      if (effectiveTeacherId) {
+        const teacherSnap = await getDoc(doc(db, 'teachers', effectiveTeacherId)).catch(() => null);
+        if (teacherSnap && teacherSnap.exists()) {
+          savedTeacherActiveSetId = teacherSnap.data()?.activeSetId;
+        }
+      }
+
+      // Auto-initialize a personal "Bộ câu hỏi 1 (Mặc định)" for this teacher if they have 0 sets yet
       if (sets.length === 0) {
         const [mcqSnap, tfSnap, saSnap] = await Promise.all([
           getDocs(collection(db, 'questions_mcq')),
           getDocs(collection(db, 'questions_tf')),
           getDocs(collection(db, 'questions_sa'))
         ]);
-        const legacyMcqs = mcqSnap.docs.map(d => ({ id: d.id, ...d.data() } as MCQQuestion));
-        const legacyTfs = tfSnap.docs.map(d => ({ id: d.id, ...d.data() } as TFQuestion));
-        const legacySas = saSnap.docs.map(d => ({ id: d.id, ...d.data() } as SAQuestion));
-        const total = legacyMcqs.length + legacyTfs.length + legacySas.length;
+        let seedMcqs = mcqSnap.docs.map((d, idx) => ({ ...d.data(), id: d.id || `mcq_init_${idx}` } as MCQQuestion));
+        let seedTfs = tfSnap.docs.map((d, idx) => ({ ...d.data(), id: d.id || `tf_init_${idx}` } as TFQuestion));
+        let seedSas = saSnap.docs.map((d, idx) => ({ ...d.data(), id: d.id || `sa_init_${idx}` } as SAQuestion));
+
+        if (seedMcqs.length + seedTfs.length + seedSas.length === 0 && PRESET_QUESTION_SETS.length > 0) {
+          const preset0 = PRESET_QUESTION_SETS[0];
+          seedMcqs = (preset0.mcqs || []).map((item, idx) => ({ ...item, id: `mcq_init_${idx}` }));
+          seedTfs = (preset0.tfs || []).map((item, idx) => ({ ...item, id: `tf_init_${idx}` }));
+          seedSas = (preset0.sas || []).map((item, idx) => ({ ...item, id: `sa_init_${idx}` }));
+        }
+
+        const total = seedMcqs.length + seedTfs.length + seedSas.length;
         if (total > 0) {
-          const initialSetData = {
+          const initialSetData: Omit<QuestionSet, 'id'> = {
             title: 'Bộ câu hỏi 1 (Mặc định)',
-            description: 'Bộ câu hỏi tự động khởi tạo từ ngân hàng đề',
+            description: `Bộ câu hỏi của GV ${effectiveTeacherName}`,
+            subject: currentTeacher?.subject || 'Tin học',
+            sourceType: 'preset',
             teacherId: effectiveTeacherId,
             teacherName: effectiveTeacherName,
             isActive: true,
-            mcqs: legacyMcqs,
-            tfs: legacyTfs,
-            sas: legacySas,
+            mcqs: seedMcqs,
+            tfs: seedTfs,
+            sas: seedSas,
             totalQuestions: total,
             createdAt: new Date().toISOString()
           };
           const ref = await addDoc(collection(db, 'question_sets'), initialSetData);
           sets = [{ id: ref.id, ...initialSetData }];
+          if (effectiveTeacherId) {
+            await setDoc(
+              doc(db, 'teachers', effectiveTeacherId),
+              {
+                activeSetId: ref.id,
+                activeSetTitle: initialSetData.title,
+                activeSetSubject: initialSetData.subject || '',
+                updatedAt: new Date().toISOString()
+              },
+              { merge: true }
+            ).catch(() => {});
+          }
         }
       }
 
       setQuestionSets(sets);
-      const active = sets.find(s => s.isActive);
+      const active =
+        savedTeacherActiveSetId !== undefined
+          ? sets.find(s => s.id === savedTeacherActiveSetId) || null
+          : sets.find(s => s.teacherId === effectiveTeacherId && s.isActive) ||
+            sets.find(s => s.isActive) ||
+            null;
+
       if (active) {
         setActiveSetId(active.id);
         setSelectedSetId(prev => prev || active.id);
-      } else if (sets.length > 0) {
-        setSelectedSetId(prev => prev || sets[0].id);
+      } else {
+        setActiveSetId(null);
+        if (sets.length > 0) {
+          setSelectedSetId(prev => prev || sets[0].id);
+        }
       }
     } catch (err) {
       console.error('Error fetching question sets:', err);
@@ -298,7 +354,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
     fetchQuestionsList();
     fetchResults();
     loadSettings();
-  }, []);
+  }, [effectiveTeacherId]);
 
   // 2. Fetch Students when selectedClass changes
   useEffect(() => {
@@ -548,19 +604,25 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
     if (!newClassName.trim()) return;
 
     try {
-      const docRef = await addDoc(collection(db, 'classes'), {
+      const currentActiveSet = activeSetId ? questionSets.find(s => s.id === activeSetId) : null;
+      const classPayload: Omit<ClassItem, 'id'> & { createdAt: string } = {
         name: newClassName.trim(),
         teacherId: currentTeacherId,
         teacherName: currentTeacherName,
         studentCount: 0,
+        ...(currentActiveSet
+          ? {
+              assignedSetId: currentActiveSet.id,
+              assignedSetTitle: currentActiveSet.title,
+              assignedSetSubject: currentActiveSet.subject || ''
+            }
+          : {}),
         createdAt: new Date().toISOString()
-      });
+      };
+      const docRef = await addDoc(collection(db, 'classes'), classPayload);
       const newClass: ClassItem = {
         id: docRef.id,
-        name: newClassName.trim(),
-        teacherId: currentTeacherId,
-        teacherName: currentTeacherName,
-        studentCount: 0
+        ...classPayload
       };
       setClasses(prev => [...prev, newClass]);
       setSelectedClass(newClass);
@@ -721,43 +783,119 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
     }
   };
 
-  // Import Questions from Excel -> Automatically saves as "Bộ câu hỏi 1, 2, 3..." & Auto-Sync to Google Sheet
+  // Helper to resolve effective subject name
+  const getEffectiveSubject = (): string => {
+    if (selectedSubject === 'Môn tổng hợp / Khác') {
+      return customSubjectInput.trim() || 'Môn tổng hợp';
+    }
+    return selectedSubject.trim();
+  };
+
+  // Import Questions from Excel, Word, or PDF -> Requires selecting Subject & Saves as "Bộ câu hỏi 1, 2, 3..."
   const handleImportQuestionsExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    const effectiveSubj = getEffectiveSubject();
+    if (!effectiveSubj && !importTargetSetId) {
+      setExcelStatusMessage({
+        type: 'error',
+        text: '⚠️ Vui lòng chọn MÔN ÁP DỤNG trước khi tải file câu hỏi (Excel, Word, PDF) lên!'
+      });
+      showToast('error', 'Vui lòng chọn Môn áp dụng trước khi tải bộ câu hỏi lên!');
+      e.target.value = '';
+      return;
+    }
+
     setUploadingExcel(true);
     setExcelStatusMessage(null);
     try {
-      const { mcqs, tfs, sas } = await parseQuestionsFromExcel(file);
+      const targetExistingSet = importTargetSetId
+        ? questionSets.find(s => s.id === importTargetSetId)
+        : null;
+      const subjectToApply = effectiveSubj || targetExistingSet?.subject || 'Tin học';
+
+      const { mcqs, tfs, sas, fileType } = await parseQuestionsFromAnyFile(file, subjectToApply);
       const total = mcqs.length + tfs.length + sas.length;
 
       if (total === 0) {
         setExcelStatusMessage({
           type: 'error',
-          text: 'Không tìm thấy câu hỏi hợp lệ trong file Excel. Vui lòng tải file mẫu để kiểm tra định dạng!'
+          text: 'Không tìm thấy câu hỏi hợp lệ trong file. Vui lòng kiểm tra định dạng câu hỏi (Câu 1:, A., B., C., D.) hoặc tải file mẫu!'
         });
+        showToast('error', 'Không tìm thấy câu hỏi hợp lệ trong file đã chọn.');
         return;
       }
 
-      // Determine Set number: Bộ câu hỏi 1, 2, 3...
+      const fileTypeLabel = fileType === 'excel' ? 'Excel' : fileType === 'word' ? 'Word' : 'PDF';
+
+      // Case A: Importing additional questions into an existing Question Set
+      if (targetExistingSet) {
+        const updatedMcqs = [...(targetExistingSet.mcqs || []), ...mcqs];
+        const updatedTfs = [...(targetExistingSet.tfs || []), ...tfs];
+        const updatedSas = [...(targetExistingSet.sas || []), ...sas];
+        const updatedTotal = updatedMcqs.length + updatedTfs.length + updatedSas.length;
+
+        await updateDoc(doc(db, 'question_sets', targetExistingSet.id), {
+          mcqs: updatedMcqs,
+          tfs: updatedTfs,
+          sas: updatedSas,
+          totalQuestions: updatedTotal,
+          subject: targetExistingSet.subject || subjectToApply
+        });
+
+        const newlyAddedForSheet: Array<{ id: string; type: 'mcq' | 'tf' | 'sa'; text: string; imageUrl?: string; details?: any; setName?: string }> = [];
+        for (const q of mcqs) {
+          const ref = await addDoc(collection(db, 'questions_mcq'), { ...q, subject: subjectToApply, setId: targetExistingSet.id, setTitle: targetExistingSet.title });
+          newlyAddedForSheet.push({ id: ref.id, type: 'mcq', text: q.text, imageUrl: q.imageUrl, details: q, setName: targetExistingSet.title });
+        }
+        for (const q of tfs) {
+          const ref = await addDoc(collection(db, 'questions_tf'), { ...q, subject: subjectToApply, setId: targetExistingSet.id, setTitle: targetExistingSet.title });
+          newlyAddedForSheet.push({ id: ref.id, type: 'tf', text: q.text, imageUrl: q.imageUrl, details: q, setName: targetExistingSet.title });
+        }
+        for (const q of sas) {
+          const ref = await addDoc(collection(db, 'questions_sa'), { ...q, subject: subjectToApply, setId: targetExistingSet.id, setTitle: targetExistingSet.title });
+          newlyAddedForSheet.push({ id: ref.id, type: 'sa', text: q.text, imageUrl: q.imageUrl, details: q, setName: targetExistingSet.title });
+        }
+
+        syncQuestionsToSheet(newlyAddedForSheet, effectiveTeacherId, undefined, targetExistingSet.title).catch(console.warn);
+
+        setQuestionSets(prev => prev.map(s => s.id === targetExistingSet.id ? {
+          ...s,
+          mcqs: updatedMcqs,
+          tfs: updatedTfs,
+          sas: updatedSas,
+          totalQuestions: updatedTotal,
+          subject: s.subject || subjectToApply
+        } : s));
+        setSelectedSetId(targetExistingSet.id);
+        setImportTargetSetId(null);
+        setShowAddSetModal(false);
+        fetchQuestionsCount();
+        fetchQuestionsList();
+
+        showToast('success', `Đã nhập thêm ${total} câu từ file ${fileTypeLabel} vào "${targetExistingSet.title}" (Môn: ${subjectToApply})!`);
+        return;
+      }
+
+      // Case B: Creating a brand new QuestionSet ("Bộ câu hỏi 1, 2, 3...")
       const nextNum = questionSets.length + 1;
-      const finalTitle = newSetNameInput.trim() || `Bộ câu hỏi ${nextNum}`;
+      const finalTitle = newSetNameInput.trim() || `Bộ câu hỏi ${nextNum} - ${subjectToApply}`;
       const shouldActivate = autoActivateUploadedSet || questionSets.length === 0;
 
-      // If this set should be active, deactivate all other sets of this teacher
       if (shouldActivate) {
         for (const s of questionSets) {
-          if (s.isActive) {
+          if (s.teacherId === effectiveTeacherId && s.isActive) {
             await updateDoc(doc(db, 'question_sets', s.id), { isActive: false }).catch(() => {});
           }
         }
       }
 
-      // Create new QuestionSet in Firestore
       const newSetData: Omit<QuestionSet, 'id'> = {
         title: finalTitle,
-        description: `Đề thi gồm ${total} câu hỏi được tải lên từ file Excel`,
+        description: `Đề thi môn ${subjectToApply} gồm ${total} câu hỏi được tải lên từ file ${fileTypeLabel} (${file.name})`,
+        subject: subjectToApply,
+        sourceType: fileType,
         teacherId: effectiveTeacherId,
         teacherName: effectiveTeacherName,
         isActive: shouldActivate,
@@ -771,9 +909,142 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
       const setDocRef = await addDoc(collection(db, 'question_sets'), newSetData);
       const createdSet: QuestionSet = { id: setDocRef.id, ...newSetData };
 
-      // Also add to legacy collections with setId & setTitle for full backward compatibility
       const newlyAddedForSheet: Array<{ id: string; type: 'mcq' | 'tf' | 'sa'; text: string; imageUrl?: string; details?: any; setName?: string }> = [];
 
+      for (const q of mcqs) {
+        const ref = await addDoc(collection(db, 'questions_mcq'), { ...q, subject: subjectToApply, setId: setDocRef.id, setTitle: finalTitle });
+        newlyAddedForSheet.push({ id: ref.id, type: 'mcq', text: q.text, imageUrl: q.imageUrl, details: q, setName: finalTitle });
+      }
+      for (const q of tfs) {
+        const ref = await addDoc(collection(db, 'questions_tf'), { ...q, subject: subjectToApply, setId: setDocRef.id, setTitle: finalTitle });
+        newlyAddedForSheet.push({ id: ref.id, type: 'tf', text: q.text, imageUrl: q.imageUrl, details: q, setName: finalTitle });
+      }
+      for (const q of sas) {
+        const ref = await addDoc(collection(db, 'questions_sa'), { ...q, subject: subjectToApply, setId: setDocRef.id, setTitle: finalTitle });
+        newlyAddedForSheet.push({ id: ref.id, type: 'sa', text: q.text, imageUrl: q.imageUrl, details: q, setName: finalTitle });
+      }
+
+      syncQuestionsToSheet(newlyAddedForSheet, effectiveTeacherId, undefined, finalTitle).catch(console.warn);
+
+      setQuestionSets(prev => [
+        createdSet,
+        ...prev.map(s => (shouldActivate && s.teacherId === effectiveTeacherId ? { ...s, isActive: false } : s))
+      ]);
+      setSelectedSetId(setDocRef.id);
+      if (shouldActivate) {
+        setActiveSetId(setDocRef.id);
+        if (effectiveTeacherId) {
+          await setDoc(
+            doc(db, 'teachers', effectiveTeacherId),
+            {
+              activeSetId: setDocRef.id,
+              activeSetTitle: finalTitle,
+              activeSetSubject: subjectToApply,
+              updatedAt: new Date().toISOString()
+            },
+            { merge: true }
+          ).catch(() => {});
+        }
+        const myClasses = classes.filter(c => !isAdmin || c.teacherId === effectiveTeacherId);
+        const nowIso = new Date().toISOString();
+        await Promise.all(
+          myClasses.map(c =>
+            updateDoc(doc(db, 'classes', c.id), {
+              assignedSetId: setDocRef.id,
+              assignedSetTitle: finalTitle,
+              assignedSetSubject: subjectToApply,
+              updatedAt: nowIso
+            }).catch(() => {})
+          )
+        );
+        setClasses(prev => prev.map(c => (!isAdmin || c.teacherId === effectiveTeacherId) ? {
+          ...c,
+          assignedSetId: setDocRef.id,
+          assignedSetTitle: finalTitle,
+          assignedSetSubject: subjectToApply
+        } : c));
+        if (selectedClass && (!isAdmin || selectedClass.teacherId === effectiveTeacherId)) {
+          setSelectedClass(prev => prev ? {
+            ...prev,
+            assignedSetId: setDocRef.id,
+            assignedSetTitle: finalTitle,
+            assignedSetSubject: subjectToApply
+          } : null);
+        }
+      }
+      setNewSetNameInput('');
+      setShowAddSetModal(false);
+
+      fetchQuestionsCount();
+      fetchQuestionsList();
+
+      setExcelStatusMessage({
+        type: 'success',
+        text: `Đã lưu thành "${finalTitle}" (Môn: ${subjectToApply}, Nguồn: File ${fileTypeLabel}) gồm ${total} câu (${mcqs.length} trắc nghiệm, ${tfs.length} đúng/sai, ${sas.length} trả lời ngắn) và tự động đồng bộ lên Google Sheet! ${shouldActivate ? 'Bộ đề này đã được CHỌN CHO HỌC SINH LÀM NGAY.' : ''}`
+      });
+      showToast('success', `Đã tạo "${finalTitle}" (Môn ${subjectToApply}) từ file ${fileTypeLabel}!`);
+    } catch (err: any) {
+      setExcelStatusMessage({
+        type: 'error',
+        text: 'Lỗi khi đọc file: ' + (err.message || '')
+      });
+      showToast('error', 'Lỗi khi tải file: ' + (err.message || ''));
+    } finally {
+      setUploadingExcel(false);
+      e.target.value = '';
+    }
+  };
+
+  // Hình thức 1: Chọn bộ câu hỏi có sẵn (Từ kho đề mẫu hoặc bộ đề có sẵn trên hệ thống)
+  const handleUsePresetSet = async (preset: {
+    title: string;
+    subject: string;
+    description: string;
+    mcqs: MCQQuestion[];
+    tfs: TFQuestion[];
+    sas: SAQuestion[];
+  }) => {
+    setCreatingSetLoading(true);
+    try {
+      const nextNum = questionSets.length + 1;
+      const subjectToApply = getEffectiveSubject() || preset.subject || 'Tin học';
+      const finalTitle = newSetNameInput.trim() || `Bộ câu hỏi ${nextNum} - ${preset.title}`;
+      const shouldActivate = autoActivateUploadedSet || questionSets.length === 0;
+      const total = (preset.mcqs?.length || 0) + (preset.tfs?.length || 0) + (preset.sas?.length || 0);
+
+      if (shouldActivate) {
+        for (const s of questionSets) {
+          if (s.teacherId === effectiveTeacherId && s.isActive) {
+            await updateDoc(doc(db, 'question_sets', s.id), { isActive: false }).catch(() => {});
+          }
+        }
+      }
+
+      const nowIso = new Date().toISOString();
+      const mcqs = (preset.mcqs || []).map((q, idx) => ({ ...q, id: q.id || `preset_mcq_${Date.now()}_${idx}`, subject: subjectToApply, createdAt: nowIso }));
+      const tfs = (preset.tfs || []).map((q, idx) => ({ ...q, id: q.id || `preset_tf_${Date.now()}_${idx}`, subject: subjectToApply, createdAt: nowIso }));
+      const sas = (preset.sas || []).map((q, idx) => ({ ...q, id: q.id || `preset_sa_${Date.now()}_${idx}`, subject: subjectToApply, createdAt: nowIso }));
+
+      const newSetData: Omit<QuestionSet, 'id'> = {
+        title: finalTitle,
+        description: preset.description || `Bộ đề có sẵn môn ${subjectToApply}`,
+        subject: subjectToApply,
+        sourceType: 'preset',
+        teacherId: effectiveTeacherId,
+        teacherName: effectiveTeacherName,
+        isActive: shouldActivate,
+        mcqs,
+        tfs,
+        sas,
+        totalQuestions: total,
+        createdAt: nowIso
+      };
+
+      const setDocRef = await addDoc(collection(db, 'question_sets'), newSetData);
+      const createdSet: QuestionSet = { id: setDocRef.id, ...newSetData };
+
+      // Also save questions to question bank collections & sync to Sheet
+      const newlyAddedForSheet: Array<{ id: string; type: 'mcq' | 'tf' | 'sa'; text: string; imageUrl?: string; details?: any; setName?: string }> = [];
       for (const q of mcqs) {
         const ref = await addDoc(collection(db, 'questions_mcq'), { ...q, setId: setDocRef.id, setTitle: finalTitle });
         newlyAddedForSheet.push({ id: ref.id, type: 'mcq', text: q.text, imageUrl: q.imageUrl, details: q, setName: finalTitle });
@@ -787,64 +1058,419 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
         newlyAddedForSheet.push({ id: ref.id, type: 'sa', text: q.text, imageUrl: q.imageUrl, details: q, setName: finalTitle });
       }
 
-      // Automatically sync newly uploaded set to Google Sheet (NganHang_CauHoi)
       syncQuestionsToSheet(newlyAddedForSheet, effectiveTeacherId, undefined, finalTitle).catch(console.warn);
 
-      // Update local state
       setQuestionSets(prev => [
         createdSet,
-        ...prev.map(s => shouldActivate ? { ...s, isActive: false } : s)
+        ...prev.map(s => (shouldActivate && s.teacherId === effectiveTeacherId ? { ...s, isActive: false } : s))
       ]);
       setSelectedSetId(setDocRef.id);
       if (shouldActivate) {
         setActiveSetId(setDocRef.id);
+        if (effectiveTeacherId) {
+          await setDoc(
+            doc(db, 'teachers', effectiveTeacherId),
+            {
+              activeSetId: setDocRef.id,
+              activeSetTitle: finalTitle,
+              activeSetSubject: subjectToApply,
+              updatedAt: new Date().toISOString()
+            },
+            { merge: true }
+          ).catch(() => {});
+        }
+        const myClasses = classes.filter(c => !isAdmin || c.teacherId === effectiveTeacherId);
+        await Promise.all(
+          myClasses.map(c =>
+            updateDoc(doc(db, 'classes', c.id), {
+              assignedSetId: setDocRef.id,
+              assignedSetTitle: finalTitle,
+              assignedSetSubject: subjectToApply,
+              updatedAt: nowIso
+            }).catch(() => {})
+          )
+        );
+        setClasses(prev => prev.map(c => (!isAdmin || c.teacherId === effectiveTeacherId) ? {
+          ...c,
+          assignedSetId: setDocRef.id,
+          assignedSetTitle: finalTitle,
+          assignedSetSubject: subjectToApply
+        } : c));
+        if (selectedClass && (!isAdmin || selectedClass.teacherId === effectiveTeacherId)) {
+          setSelectedClass(prev => prev ? {
+            ...prev,
+            assignedSetId: setDocRef.id,
+            assignedSetTitle: finalTitle,
+            assignedSetSubject: subjectToApply
+          } : null);
+        }
       }
       setNewSetNameInput('');
+      setShowAddSetModal(false);
 
       fetchQuestionsCount();
       fetchQuestionsList();
-
-      setExcelStatusMessage({
-        type: 'success',
-        text: `Đã lưu thành "${finalTitle}" gồm ${total} câu (${mcqs.length} trắc nghiệm, ${tfs.length} đúng/sai, ${sas.length} trả lời ngắn) và tự động đồng bộ lên Google Sheet! ${shouldActivate ? 'Bộ đề này đã được CHỌN CHO HỌC SINH LÀM NGAY.' : ''}`
-      });
-      showToast('success', `Đã lưu "${finalTitle}" thành công! ${shouldActivate ? '(Đang kích hoạt cho HS)' : ''}`);
+      showToast('success', `Đã thêm "${finalTitle}" (Môn: ${subjectToApply}) từ kho bộ đề có sẵn!`);
     } catch (err: any) {
-      setExcelStatusMessage({
-        type: 'error',
-        text: 'Lỗi khi đọc file: ' + (err.message || '')
-      });
-      showToast('error', 'Lỗi khi tải file: ' + (err.message || ''));
+      showToast('error', 'Lỗi khi tạo bộ đề có sẵn: ' + (err.message || ''));
     } finally {
-      setUploadingExcel(false);
-      e.target.value = '';
+      setCreatingSetLoading(false);
     }
   };
 
-  // Select Active Question Set for Students (GV muốn HS làm bộ câu hỏi nào thì chọn bộ đó)
+  // Hình thức 2: Chọn câu hỏi từ Ngân hàng đề để tạo bộ mới
+  const handleCreateSetFromBank = async () => {
+    const effectiveSubj = getEffectiveSubject();
+    if (!effectiveSubj) {
+      showToast('error', 'Vui lòng chọn Môn áp dụng trước khi tạo bộ câu hỏi từ ngân hàng đề!');
+      return;
+    }
+    if (selectedBankQuestionIds.length === 0) {
+      showToast('error', 'Vui lòng tích chọn ít nhất 1 câu hỏi từ ngân hàng đề!');
+      return;
+    }
+
+    setCreatingSetLoading(true);
+    try {
+      const pickedQuestions = questionList.filter(q => selectedBankQuestionIds.includes(q.id));
+      const nowIso = new Date().toISOString();
+
+      const mcqs: MCQQuestion[] = pickedQuestions
+        .filter(q => q.type === 'mcq')
+        .map(q => ({
+          id: q.id,
+          text: q.text,
+          options: q.details?.options || ['', '', '', ''],
+          correctAnswerIndex: q.details?.correctAnswerIndex ?? 0,
+          imageUrl: q.imageUrl || undefined,
+          subject: effectiveSubj,
+          createdAt: nowIso
+        }));
+
+      const tfs: TFQuestion[] = pickedQuestions
+        .filter(q => q.type === 'tf')
+        .map(q => ({
+          id: q.id,
+          text: q.text,
+          statements: q.details?.statements || [
+            { text: 'Ý a', isTrue: true },
+            { text: 'Ý b', isTrue: false },
+            { text: 'Ý c', isTrue: true },
+            { text: 'Ý d', isTrue: false }
+          ],
+          imageUrl: q.imageUrl || undefined,
+          subject: effectiveSubj,
+          createdAt: nowIso
+        }));
+
+      const sas: SAQuestion[] = pickedQuestions
+        .filter(q => q.type === 'sa')
+        .map(q => ({
+          id: q.id,
+          text: q.text,
+          correctAnswers: q.details?.correctAnswers || [''],
+          imageUrl: q.imageUrl || undefined,
+          subject: effectiveSubj,
+          createdAt: nowIso
+        }));
+
+      const total = mcqs.length + tfs.length + sas.length;
+      const nextNum = questionSets.length + 1;
+      const finalTitle = newSetNameInput.trim() || `Bộ câu hỏi ${nextNum} - ${effectiveSubj}`;
+      const shouldActivate = autoActivateUploadedSet || questionSets.length === 0;
+
+      if (shouldActivate) {
+        for (const s of questionSets) {
+          if (s.teacherId === effectiveTeacherId && s.isActive) {
+            await updateDoc(doc(db, 'question_sets', s.id), { isActive: false }).catch(() => {});
+          }
+        }
+      }
+
+      const newSetData: Omit<QuestionSet, 'id'> = {
+        title: finalTitle,
+        description: `Bộ câu hỏi môn ${effectiveSubj} được trích xuất từ Ngân hàng đề (${total} câu)`,
+        subject: effectiveSubj,
+        sourceType: 'bank',
+        teacherId: effectiveTeacherId,
+        teacherName: effectiveTeacherName,
+        isActive: shouldActivate,
+        mcqs,
+        tfs,
+        sas,
+        totalQuestions: total,
+        createdAt: nowIso
+      };
+
+      const setDocRef = await addDoc(collection(db, 'question_sets'), newSetData);
+      const createdSet: QuestionSet = { id: setDocRef.id, ...newSetData };
+
+      syncQuestionsToSheet(
+        pickedQuestions.map(q => ({ ...q, setName: finalTitle })),
+        effectiveTeacherId,
+        undefined,
+        finalTitle
+      ).catch(console.warn);
+
+      setQuestionSets(prev => [
+        createdSet,
+        ...prev.map(s => (shouldActivate && s.teacherId === effectiveTeacherId ? { ...s, isActive: false } : s))
+      ]);
+      setSelectedSetId(setDocRef.id);
+      if (shouldActivate) {
+        setActiveSetId(setDocRef.id);
+        if (effectiveTeacherId) {
+          await setDoc(
+            doc(db, 'teachers', effectiveTeacherId),
+            {
+              activeSetId: setDocRef.id,
+              activeSetTitle: finalTitle,
+              activeSetSubject: effectiveSubj,
+              updatedAt: new Date().toISOString()
+            },
+            { merge: true }
+          ).catch(() => {});
+        }
+        const myClasses = classes.filter(c => !isAdmin || c.teacherId === effectiveTeacherId);
+        await Promise.all(
+          myClasses.map(c =>
+            updateDoc(doc(db, 'classes', c.id), {
+              assignedSetId: setDocRef.id,
+              assignedSetTitle: finalTitle,
+              assignedSetSubject: effectiveSubj,
+              updatedAt: nowIso
+            }).catch(() => {})
+          )
+        );
+        setClasses(prev => prev.map(c => (!isAdmin || c.teacherId === effectiveTeacherId) ? {
+          ...c,
+          assignedSetId: setDocRef.id,
+          assignedSetTitle: finalTitle,
+          assignedSetSubject: effectiveSubj
+        } : c));
+        if (selectedClass && (!isAdmin || selectedClass.teacherId === effectiveTeacherId)) {
+          setSelectedClass(prev => prev ? {
+            ...prev,
+            assignedSetId: setDocRef.id,
+            assignedSetTitle: finalTitle,
+            assignedSetSubject: effectiveSubj
+          } : null);
+        }
+      }
+      setNewSetNameInput('');
+      setSelectedBankQuestionIds([]);
+      setShowAddSetModal(false);
+
+      showToast('success', `Đã tạo "${finalTitle}" (Môn: ${effectiveSubj}) gồm ${total} câu hỏi từ Ngân hàng đề!`);
+    } catch (err: any) {
+      showToast('error', 'Lỗi khi tạo bộ câu hỏi từ ngân hàng: ' + (err.message || ''));
+    } finally {
+      setCreatingSetLoading(false);
+    }
+  };
+
+  // Auto-pick standard structure (16 MCQ + 4 TF + 4 SA) from filtered bank questions
+  const handleAutoPickStandardStructureFromBank = () => {
+    const filteredBank = questionList.filter(q => {
+      if (bankFilterSubject !== 'all') {
+        const qSubj = q.details?.subject || '';
+        if (qSubj !== bankFilterSubject) return false;
+      }
+      return true;
+    });
+    const shuffle = <T,>(arr: T[]): T[] => [...arr].sort(() => Math.random() - 0.5);
+    const pickedMcq = shuffle(filteredBank.filter(q => q.type === 'mcq')).slice(0, 16).map(q => q.id);
+    const pickedTf = shuffle(filteredBank.filter(q => q.type === 'tf')).slice(0, 4).map(q => q.id);
+    const pickedSa = shuffle(filteredBank.filter(q => q.type === 'sa')).slice(0, 4).map(q => q.id);
+    const combined = [...pickedMcq, ...pickedTf, ...pickedSa];
+    setSelectedBankQuestionIds(combined);
+    showToast('info', `Đã tự động chọn ngẫu nhiên ${combined.length} câu (${pickedMcq.length} TN, ${pickedTf.length} Đ/S, ${pickedSa.length} TLN).`);
+  };
+
+  // Assign a specific Question Set to a specific Class (Sau khi vào lớp, chọn bộ câu hỏi để lớp làm bài)
+  const handleAssignSetToClass = async (targetClass: ClassItem, setId: string) => {
+    try {
+      const chosenSet = setId ? questionSets.find(s => s.id === setId) : null;
+      const payload = {
+        assignedSetId: chosenSet ? chosenSet.id : '',
+        assignedSetTitle: chosenSet ? chosenSet.title : '',
+        assignedSetSubject: chosenSet?.subject || '',
+        updatedAt: new Date().toISOString()
+      };
+
+      await updateDoc(doc(db, 'classes', targetClass.id), payload);
+
+      setClasses(prev =>
+        prev.map(c => (c.id === targetClass.id ? { ...c, ...payload } : c))
+      );
+      if (selectedClass?.id === targetClass.id) {
+        setSelectedClass(prev => (prev ? { ...prev, ...payload } : null));
+      }
+
+      if (chosenSet) {
+        showToast(
+          'success',
+          `Đã chọn "${chosenSet.title}" cho Lớp ${targetClass.name} làm bài! Học sinh Lớp ${targetClass.name} chỉ thấy duy nhất bộ câu hỏi này.`
+        );
+      } else {
+        showToast(
+          'info',
+          `Đã tạm đóng bộ câu hỏi đối với Lớp ${targetClass.name}. Học sinh lớp này sẽ không thấy đề thi nào.`
+        );
+      }
+    } catch (err: any) {
+      console.error('Error assigning question set to class:', err);
+      showToast('error', 'Lỗi khi chọn bộ câu hỏi cho lớp: ' + (err.message || ''));
+    }
+  };
+
+  // Select Active Question Set for THIS Teacher's Students (Mỗi GV tự chọn bộ câu hỏi cho mình để HS của mình làm)
   const handleSelectActiveSet = async (targetSet: QuestionSet) => {
     try {
-      // 1. In Firestore, update all other sets of this teacher to isActive: false and targetSet to isActive: true
-      const batchUpdates = questionSets.map(async (s) => {
+      // 1. Update isActive ONLY on question_sets owned by this teacher (never overwrite other teachers' sets)
+      const mySets = questionSets.filter(s => s.teacherId === effectiveTeacherId || s.id === targetSet.id);
+      const batchUpdates = mySets.map(async (s) => {
         const isTarget = s.id === targetSet.id;
-        if (s.isActive !== isTarget) {
-          await updateDoc(doc(db, 'question_sets', s.id), { isActive: isTarget });
+        if (s.teacherId === effectiveTeacherId && s.isActive !== isTarget) {
+          await updateDoc(doc(db, 'question_sets', s.id), { isActive: isTarget }).catch(() => {});
         }
       });
       await Promise.all(batchUpdates);
 
-      // 2. Update local state
-      setQuestionSets(prev => prev.map(s => ({
-        ...s,
-        isActive: s.id === targetSet.id
-      })));
+      // 2. Save activeSetId onto this teacher's profile document in Firestore
+      if (effectiveTeacherId) {
+        await setDoc(
+          doc(db, 'teachers', effectiveTeacherId),
+          {
+            activeSetId: targetSet.id,
+            activeSetTitle: targetSet.title,
+            activeSetSubject: targetSet.subject || '',
+            updatedAt: new Date().toISOString()
+          },
+          { merge: true }
+        ).catch(() => {});
+      }
+
+      // 3. Apply this chosen set to all classes belonging to THIS teacher so all of this teacher's students see it
+      const myClasses = classes.filter(c => !isAdmin || c.teacherId === effectiveTeacherId);
+      const nowIso = new Date().toISOString();
+      await Promise.all(
+        myClasses.map(c =>
+          updateDoc(doc(db, 'classes', c.id), {
+            assignedSetId: targetSet.id,
+            assignedSetTitle: targetSet.title,
+            assignedSetSubject: targetSet.subject || '',
+            updatedAt: nowIso
+          }).catch(() => {})
+        )
+      );
+
+      setClasses(prev =>
+        prev.map(c =>
+          !isAdmin || c.teacherId === effectiveTeacherId
+            ? {
+                ...c,
+                assignedSetId: targetSet.id,
+                assignedSetTitle: targetSet.title,
+                assignedSetSubject: targetSet.subject || '',
+                updatedAt: nowIso
+              }
+            : c
+        )
+      );
+      if (selectedClass && (!isAdmin || selectedClass.teacherId === effectiveTeacherId)) {
+        setSelectedClass(prev =>
+          prev
+            ? {
+                ...prev,
+                assignedSetId: targetSet.id,
+                assignedSetTitle: targetSet.title,
+                assignedSetSubject: targetSet.subject || '',
+                updatedAt: nowIso
+              }
+            : null
+        );
+      }
+
+      // 4. Update local state
+      setQuestionSets(prev =>
+        prev.map(s =>
+          s.teacherId === effectiveTeacherId
+            ? { ...s, isActive: s.id === targetSet.id }
+            : s
+        )
+      );
       setActiveSetId(targetSet.id);
       setSelectedSetId(targetSet.id);
 
-      showToast('success', `Đã chọn "${targetSet.title}" cho học sinh làm bài! Học sinh chỉ nhìn thấy và làm bộ đề này.`);
+      showToast(
+        'success',
+        `Đã chọn "${targetSet.title}" cho học sinh của GV ${effectiveTeacherName} làm bài! Học sinh của Thầy/Cô chỉ nhìn thấy bộ đề này.`
+      );
     } catch (err: any) {
       console.error('Error activating question set:', err);
       showToast('error', 'Lỗi khi kích hoạt bộ câu hỏi: ' + (err.message || ''));
+    }
+  };
+
+  // Select or close Question Set for all classes of THIS teacher via dropdown
+  const handleSelectTeacherSetById = async (setId: string) => {
+    if (!setId) {
+      try {
+        const mySets = questionSets.filter(s => s.teacherId === effectiveTeacherId && s.isActive);
+        await Promise.all(
+          mySets.map(s => updateDoc(doc(db, 'question_sets', s.id), { isActive: false }).catch(() => {}))
+        );
+        if (effectiveTeacherId) {
+          await setDoc(
+            doc(db, 'teachers', effectiveTeacherId),
+            {
+              activeSetId: '',
+              activeSetTitle: '',
+              activeSetSubject: '',
+              updatedAt: new Date().toISOString()
+            },
+            { merge: true }
+          ).catch(() => {});
+        }
+        const myClasses = classes.filter(c => !isAdmin || c.teacherId === effectiveTeacherId);
+        const nowIso = new Date().toISOString();
+        await Promise.all(
+          myClasses.map(c =>
+            updateDoc(doc(db, 'classes', c.id), {
+              assignedSetId: '',
+              assignedSetTitle: '',
+              assignedSetSubject: '',
+              updatedAt: nowIso
+            }).catch(() => {})
+          )
+        );
+        setClasses(prev =>
+          prev.map(c =>
+            !isAdmin || c.teacherId === effectiveTeacherId
+              ? { ...c, assignedSetId: '', assignedSetTitle: '', assignedSetSubject: '', updatedAt: nowIso }
+              : c
+          )
+        );
+        if (selectedClass && (!isAdmin || selectedClass.teacherId === effectiveTeacherId)) {
+          setSelectedClass(prev =>
+            prev ? { ...prev, assignedSetId: '', assignedSetTitle: '', assignedSetSubject: '', updatedAt: nowIso } : null
+          );
+        }
+        setQuestionSets(prev =>
+          prev.map(s => (s.teacherId === effectiveTeacherId ? { ...s, isActive: false } : s))
+        );
+        setActiveSetId(null);
+        showToast('info', `Đã tạm đóng bộ câu hỏi đối với học sinh của GV ${effectiveTeacherName}.`);
+      } catch (err: any) {
+        showToast('error', 'Lỗi khi cập nhật bộ câu hỏi: ' + (err.message || ''));
+      }
+      return;
+    }
+
+    const found = questionSets.find(s => s.id === setId);
+    if (found) {
+      await handleSelectActiveSet(found);
     }
   };
 
@@ -1394,7 +2020,73 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
 
       {/* ================= TAB 1: LỚP VÀ HỌC SINH ================= */}
       {activeTab === 'classes' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+        <div className="space-y-6">
+          {/* ================= BỘ CÂU HỎI CỦA GIÁO VIÊN ĐANG CHỌN CHO HỌC SINH CỦA MÌNH ================= */}
+          {(() => {
+            const activeTeacherSet = activeSetId ? questionSets.find(s => s.id === activeSetId) : null;
+            return (
+              <div className="bg-linear-to-r from-indigo-50 via-emerald-50/60 to-white p-5 sm:p-6 rounded-3xl border-2 border-indigo-200 shadow-xs">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                  <div className="flex items-start gap-3.5">
+                    <div className="w-11 h-11 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-xs mt-0.5">
+                      <BookOpen className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-base sm:text-lg font-extrabold text-zinc-900">
+                          Bộ Câu Hỏi Của Giáo Viên: <span className="text-indigo-700">{effectiveTeacherName}</span>
+                        </h3>
+                        {activeTeacherSet ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-600 text-white text-[11px] font-bold">
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>ĐANG MỞ CHO HS CỦA GV {effectiveTeacherName.toUpperCase()}</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-200 text-amber-900 text-[11px] font-bold">
+                            <span>CHƯA CHỌN ĐỀ</span>
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
+                        Mỗi Giáo viên tự chọn bộ câu hỏi riêng cho mình để <strong>học sinh của mình làm bài</strong>. Học sinh thuộc lớp của Thầy/Cô chỉ nhìn thấy bộ câu hỏi do Thầy/Cô chọn, hoàn toàn độc lập với Giáo viên khác.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 shrink-0">
+                    <select
+                      value={activeSetId || ''}
+                      onChange={(e) => handleSelectTeacherSetById(e.target.value)}
+                      className="px-3.5 py-2.5 bg-white border-2 border-indigo-300 focus:border-emerald-600 rounded-xl text-xs sm:text-sm font-bold text-zinc-900 focus:outline-hidden cursor-pointer min-w-[260px]"
+                    >
+                      <option value="">-- Chọn bộ câu hỏi cho toàn bộ HS của tôi --</option>
+                      {questionSets.map(s => (
+                        <option key={s.id} value={s.id}>
+                          {s.title} {s.subject ? `(Môn: ${s.subject})` : ''} — {s.totalQuestions || 0} câu
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setImportTargetSetId(null);
+                        setNewSetNameInput(`Bộ câu hỏi ${questionSets.length + 1}`);
+                        setAddSetMode('upload');
+                        setShowAddSetModal(true);
+                      }}
+                      className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs sm:text-sm rounded-xl inline-flex items-center justify-center gap-1.5 shadow-xs transition-all cursor-pointer shrink-0"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>+ Thêm Bộ Câu Hỏi Của Tôi</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
           {/* Left Column: Classes List & Create */}
           <div className="lg:col-span-4 space-y-6">
             <div className="bg-white p-6 rounded-3xl border border-zinc-200 shadow-xs">
@@ -1444,6 +2136,13 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                 <div className="space-y-2">
                   {classes.map(c => {
                     const isSelected = selectedClass?.id === c.id;
+                    const classAssignedSet = c.assignedSetId
+                      ? questionSets.find(s => s.id === c.assignedSetId)
+                      : c.assignedSetId === undefined && activeSetId
+                      ? questionSets.find(s => s.id === activeSetId)
+                      : null;
+                    const displaySetTitle = classAssignedSet?.title || (c.assignedSetId ? c.assignedSetTitle : '');
+
                     return (
                       <div
                         key={c.id}
@@ -1454,21 +2153,28 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                             : 'bg-zinc-50/70 border-zinc-200 hover:bg-zinc-100 text-zinc-700'
                         }`}
                       >
-                        <div className="flex items-center gap-3">
-                          <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-sm font-bold ${
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-sm font-bold shrink-0 ${
                             isSelected ? 'bg-emerald-600 text-white' : 'bg-zinc-200 text-zinc-700'
                           }`}>
                             {c.name.slice(0, 3)}
                           </div>
-                          <div>
-                            <div className="text-sm">{c.name}</div>
-                            <div className="text-xs text-zinc-400 font-normal">
-                              {c.teacherName || 'Giáo viên'}
-                            </div>
+                          <div className="min-w-0">
+                            <div className="text-sm font-bold">Lớp {c.name}</div>
+                            {displaySetTitle ? (
+                              <div className="text-[11px] text-emerald-700 font-semibold truncate flex items-center gap-1 mt-0.5">
+                                <BookOpen className="w-3 h-3 shrink-0" />
+                                <span className="truncate">{displaySetTitle}</span>
+                              </div>
+                            ) : (
+                              <div className="text-[11px] text-amber-600 font-medium mt-0.5">
+                                Chưa chọn bộ câu hỏi
+                              </div>
+                            )}
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 shrink-0">
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
@@ -1489,10 +2195,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
             </div>
           </div>
 
-          {/* Right Column: Students of Selected Class */}
+          {/* Right Column: Students & Question Set Assignment of Selected Class */}
           <div className="lg:col-span-8 space-y-6">
             {selectedClass ? (
-              <div className="bg-white p-6 sm:p-8 rounded-3xl border border-zinc-200 shadow-xs">
+              <div className="bg-white p-6 sm:p-8 rounded-3xl border border-zinc-200 shadow-xs space-y-6">
                 {/* Header of class */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-zinc-100">
                   <div>
@@ -1544,8 +2250,185 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                   </div>
                 </div>
 
+                {/* ================= CHỌN BỘ CÂU HỎI ĐỂ LỚP LÀM BÀI (HIỂN THỊ NGAY KHI VÀO LỚP) ================= */}
+                {(() => {
+                  const effectiveClassSetId =
+                    selectedClass.assignedSetId !== undefined
+                      ? selectedClass.assignedSetId
+                      : activeSetId || '';
+                  const currentClassSet = effectiveClassSetId
+                    ? questionSets.find(s => s.id === effectiveClassSetId)
+                    : null;
+
+                  return (
+                    <div className={`p-5 rounded-2xl border-2 transition-all space-y-4 ${
+                      currentClassSet
+                        ? 'bg-linear-to-r from-emerald-50/90 via-teal-50/40 to-white border-emerald-400 shadow-xs'
+                        : 'bg-amber-50/60 border-amber-300'
+                    }`}>
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="flex items-start gap-3">
+                          <div className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 mt-0.5 ${
+                            currentClassSet ? 'bg-emerald-600 text-white shadow-xs' : 'bg-amber-500 text-white'
+                          }`}>
+                            <BookOpen className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h3 className="text-base sm:text-lg font-extrabold text-zinc-900">
+                                Chọn Bộ Câu Hỏi Để Lớp {selectedClass.name} Làm Bài
+                              </h3>
+                              {currentClassSet ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-600 text-white text-[11px] font-bold">
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  <span>ĐANG MỞ CHO LỚP {selectedClass.name}</span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-200 text-amber-900 text-[11px] font-bold">
+                                  <span>CHƯA MỞ ĐỀ</span>
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-zinc-600 mt-0.5 leading-relaxed">
+                              🔒 Học sinh <strong>Lớp {selectedClass.name}</strong> khi đăng nhập sẽ <strong>CHỈ nhìn thấy duy nhất bộ câu hỏi đã chọn tại đây</strong>, tuyệt đối không thể thấy các bộ câu hỏi khác!
+                            </p>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setImportTargetSetId(null);
+                            setNewSetNameInput(`Bộ câu hỏi ${questionSets.length + 1}`);
+                            setAddSetMode('upload');
+                            setShowAddSetModal(true);
+                          }}
+                          className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl inline-flex items-center gap-1.5 shadow-xs shrink-0 self-start sm:self-auto transition-all cursor-pointer"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>+ Thêm Bộ Câu Hỏi Mới</span>
+                        </button>
+                      </div>
+
+                      {/* Dropdown Selector + Active Set Summary */}
+                      <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center bg-white p-3.5 rounded-xl border border-zinc-200/80">
+                        <div className="md:col-span-7">
+                          <label className="block text-[11px] font-bold text-zinc-500 uppercase mb-1">
+                            Bộ câu hỏi áp dụng cho Lớp {selectedClass.name}:
+                          </label>
+                          <select
+                            value={effectiveClassSetId}
+                            onChange={(e) => handleAssignSetToClass(selectedClass, e.target.value)}
+                            className="w-full px-3.5 py-2.5 bg-zinc-50 border-2 border-indigo-200 focus:border-emerald-600 rounded-xl text-xs sm:text-sm font-bold text-zinc-900 focus:outline-hidden cursor-pointer"
+                          >
+                            <option value="">-- Tạm đóng / Không mở bộ câu hỏi nào cho Lớp {selectedClass.name} --</option>
+                            {questionSets.map((s) => (
+                              <option key={s.id} value={s.id}>
+                                {s.title} {s.subject ? `(Môn: ${s.subject})` : ''} — {s.totalQuestions || 0} câu
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="md:col-span-5">
+                          {currentClassSet ? (
+                            <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs space-y-1">
+                              <div className="flex items-center justify-between font-bold text-emerald-950">
+                                <span className="truncate">{currentClassSet.title}</span>
+                                <span className="px-2 py-0.5 bg-emerald-600 text-white rounded-md text-[10px] shrink-0">
+                                  {currentClassSet.totalQuestions} câu
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-emerald-800 flex flex-wrap items-center gap-1.5">
+                                {currentClassSet.subject && (
+                                  <span className="font-bold">📚 Môn: {currentClassSet.subject} •</span>
+                                )}
+                                <span>
+                                  {currentClassSet.mcqs?.length || 0} TN • {currentClassSet.tfs?.length || 0} Đ/S • {currentClassSet.sas?.length || 0} TLN
+                                </span>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 font-semibold flex items-center gap-2">
+                              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                              <span>
+                                {questionSets.length === 0
+                                  ? 'Chưa có bộ câu hỏi nào. Hãy bấm "+ Thêm Bộ Câu Hỏi Mới"!'
+                                  : `Hãy chọn 1 bộ câu hỏi ở ô bên trái hoặc bấm trực tiếp vào bộ đề bên dưới để mở cho Lớp ${selectedClass.name}.`}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Quick 1-Click Set Cards inside Class View */}
+                      {questionSets.length > 0 && (
+                        <div className="space-y-2 pt-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-500">
+                              Bấm chọn nhanh bộ câu hỏi cho Lớp {selectedClass.name} ({questionSets.length} bộ đề hiện có):
+                            </span>
+                            {currentClassSet && (
+                              <button
+                                type="button"
+                                onClick={() => handleAssignSetToClass(selectedClass, '')}
+                                className="text-[11px] font-bold text-red-600 hover:underline"
+                              >
+                                Tạm đóng đề với lớp này
+                              </button>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                            {questionSets.map((s) => {
+                              const isChosenForThisClass = effectiveClassSetId === s.id;
+                              return (
+                                <button
+                                  key={s.id}
+                                  type="button"
+                                  onClick={() => handleAssignSetToClass(selectedClass, s.id)}
+                                  className={`p-3 rounded-xl border text-left transition-all flex flex-col justify-between gap-2 cursor-pointer ${
+                                    isChosenForThisClass
+                                      ? 'border-2 border-emerald-600 bg-emerald-600 text-white shadow-sm'
+                                      : 'border-zinc-200 bg-white hover:border-indigo-400 text-zinc-800'
+                                  }`}
+                                >
+                                  <div className="w-full">
+                                    <div className="flex items-start justify-between gap-1.5">
+                                      <span className="font-extrabold text-xs sm:text-sm truncate">
+                                        {s.title}
+                                      </span>
+                                      {isChosenForThisClass && (
+                                        <CheckCircle2 className="w-4 h-4 text-white shrink-0" />
+                                      )}
+                                    </div>
+                                    <div className={`text-[11px] mt-0.5 flex flex-wrap items-center gap-1 ${
+                                      isChosenForThisClass ? 'text-emerald-100' : 'text-zinc-500'
+                                    }`}>
+                                      {s.subject && <span>Môn: {s.subject} •</span>}
+                                      <span>{s.totalQuestions || 0} câu</span>
+                                    </div>
+                                  </div>
+                                  <div className={`text-[11px] font-bold px-2 py-1 rounded-lg text-center ${
+                                    isChosenForThisClass
+                                      ? 'bg-white/20 text-white'
+                                      : 'bg-emerald-50 text-emerald-700'
+                                  }`}>
+                                    {isChosenForThisClass
+                                      ? `✓ Lớp ${selectedClass.name} đang làm bộ này`
+                                      : `Chọn cho Lớp ${selectedClass.name}`}
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {/* Form Add Individual Student */}
-                <form onSubmit={handleAddStudent} className="pt-6 pb-6 border-b border-zinc-100">
+                <form onSubmit={handleAddStudent} className="pt-2 pb-6 border-b border-zinc-100">
                   <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-500 mb-3">
                     Thêm từng học sinh thủ công
                   </h4>
@@ -1657,6 +2540,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
               </div>
             )}
           </div>
+          </div>
         </div>
       )}
 
@@ -1706,16 +2590,29 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
           <div className="bg-white p-6 sm:p-8 rounded-3xl border border-zinc-200 shadow-xs space-y-6">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
               <div>
-                <div className="flex items-center gap-2 mb-1">
+                <div className="flex flex-wrap items-center gap-2.5 mb-1">
                   <div className="w-9 h-9 bg-emerald-100 text-emerald-700 rounded-xl flex items-center justify-center">
                     <BookOpen className="w-5 h-5" />
                   </div>
                   <h2 className="text-xl sm:text-2xl font-bold text-zinc-900">
                     Quản Lý Các Bộ Câu Hỏi ({questionSets.length} bộ đề)
                   </h2>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setImportTargetSetId(null);
+                      setNewSetNameInput(`Bộ câu hỏi ${questionSets.length + 1}`);
+                      setAddSetMode('upload');
+                      setShowAddSetModal(true);
+                    }}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs sm:text-sm font-bold rounded-xl inline-flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>+ Thêm Bộ Câu Hỏi Mới (Chọn Có Sẵn / Ngân Hàng / Tải Excel, Word, PDF)</span>
+                  </button>
                 </div>
                 <p className="text-xs sm:text-sm text-zinc-500 max-w-2xl leading-relaxed">
-                  Mỗi lần Thầy/Cô tải file lên sẽ được lưu thành 1 bộ đề riêng biệt (<strong>Bộ câu hỏi 1, 2, 3...</strong>). Thầy/Cô muốn học sinh làm bài nào thì bấm <strong>"Chọn Bộ Này Cho HS Làm"</strong>. Học sinh khi đăng nhập sẽ <strong>CHỈ nhìn thấy và làm đúng bộ câu hỏi</strong> được Thầy/Cô chọn!
+                  Giáo viên có nhiều hình thức tạo đề: <strong>Chọn bộ câu hỏi có sẵn</strong>, <strong>Chọn từ ngân hàng tạo bộ mới</strong>, hoặc <strong>Tự tải bộ câu hỏi (Excel, Word, PDF) kèm chọn môn áp dụng</strong>. Thầy/Cô muốn học sinh làm bộ nào thì bấm <strong>"Chọn Bộ Này Cho HS Làm"</strong>!
                 </p>
               </div>
 
@@ -1728,6 +2625,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                     <span className="text-sm font-black text-emerald-950">
                       {questionSets.find(s => s.id === activeSetId)?.title}
                     </span>
+                    {questionSets.find(s => s.id === activeSetId)?.subject && (
+                      <span className="ml-2 px-2 py-0.5 bg-emerald-200 text-emerald-900 rounded-md text-[10px] font-bold">
+                        Môn: {questionSets.find(s => s.id === activeSetId)?.subject}
+                      </span>
+                    )}
                   </div>
                 </div>
               ) : (
@@ -1742,17 +2644,32 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
             {loadingSets ? (
               <div className="py-12 text-center text-zinc-400 text-sm">Đang tải danh sách bộ câu hỏi...</div>
             ) : questionSets.length === 0 ? (
-              <div className="py-10 px-4 text-center bg-zinc-50 rounded-2xl border border-dashed border-zinc-200">
-                <BookOpen className="w-10 h-10 text-zinc-300 mx-auto mb-3" />
-                <h4 className="font-bold text-zinc-700 text-sm mb-1">Chưa có bộ câu hỏi nào</h4>
-                <p className="text-xs text-zinc-400 max-w-md mx-auto">
-                  Hãy tải file Excel lên bên dưới để tạo <strong>Bộ câu hỏi 1</strong>. Mỗi lần tải tiếp theo sẽ tự động tăng thành <strong>Bộ câu hỏi 2, 3...</strong>
-                </p>
+              <div className="py-10 px-4 text-center bg-zinc-50 rounded-2xl border border-dashed border-zinc-200 space-y-3">
+                <BookOpen className="w-10 h-10 text-zinc-300 mx-auto" />
+                <div>
+                  <h4 className="font-bold text-zinc-700 text-sm mb-1">Chưa có bộ câu hỏi nào</h4>
+                  <p className="text-xs text-zinc-400 max-w-md mx-auto">
+                    Hãy bấm nút bên dưới để chọn bộ câu hỏi có sẵn, lấy từ ngân hàng đề, hoặc tải file Excel / Word / PDF lên!
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setImportTargetSetId(null);
+                    setNewSetNameInput('Bộ câu hỏi 1');
+                    setAddSetMode('upload');
+                    setShowAddSetModal(true);
+                  }}
+                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs sm:text-sm rounded-xl inline-flex items-center gap-2 shadow-sm transition-all"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>+ Thêm Bộ Câu Hỏi Đầu Tiên</span>
+                </button>
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                 {questionSets.map((s) => {
-                  const isActive = s.id === activeSetId || s.isActive;
+                  const isActive = s.id === activeSetId;
                   const isSelected = s.id === selectedSetId;
                   const isEditingThisTitle = editingSetTitleId === s.id;
 
@@ -1814,9 +2731,25 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                               </div>
                             )}
 
-                            <span className="text-[11px] text-zinc-400 block mt-0.5">
-                              Tạo ngày: {s.createdAt ? new Date(s.createdAt).toLocaleDateString('vi-VN') : 'Mới tạo'}
-                            </span>
+                            <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                              {s.subject && (
+                                <span className="px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-800 text-[11px] font-bold">
+                                  📚 Môn: {s.subject}
+                                </span>
+                              )}
+                              {s.sourceType && (
+                                <span className="px-2 py-0.5 rounded-md bg-zinc-100 text-zinc-600 text-[10px] font-semibold uppercase">
+                                  {s.sourceType === 'excel' ? 'Excel' :
+                                   s.sourceType === 'word' ? 'Word' :
+                                   s.sourceType === 'pdf' ? 'PDF' :
+                                   s.sourceType === 'bank' ? 'Ngân hàng đề' :
+                                   s.sourceType === 'preset' ? 'Bộ có sẵn' : 'Tự tạo'}
+                                </span>
+                              )}
+                              <span className="text-[11px] text-zinc-400">
+                                • {s.createdAt ? new Date(s.createdAt).toLocaleDateString('vi-VN') : 'Mới tạo'}
+                              </span>
+                            </div>
                           </div>
 
                           {/* Status Pill */}
@@ -1863,6 +2796,20 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                           </button>
                         )}
 
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setImportTargetSetId(s.id);
+                            if (s.subject) setSelectedSubject(s.subject);
+                            setAddSetMode('upload');
+                            setShowAddSetModal(true);
+                          }}
+                          className="w-full py-1.5 px-2.5 rounded-lg font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs flex items-center justify-center gap-1.5 transition-all"
+                        >
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>+ Nhập thêm câu hỏi (Excel / Word / PDF) vào bộ này</span>
+                        </button>
+
                         <div className="grid grid-cols-3 gap-1.5 pt-1 text-xs">
                           <button
                             type="button"
@@ -1903,39 +2850,92 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                     </div>
                   );
                 })}
+
+                {/* Dashed Add New Question Set Card */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setImportTargetSetId(null);
+                    setNewSetNameInput(`Bộ câu hỏi ${questionSets.length + 1}`);
+                    setAddSetMode('upload');
+                    setShowAddSetModal(true);
+                  }}
+                  className="rounded-2xl p-6 border-2 border-dashed border-indigo-300 hover:border-indigo-500 bg-indigo-50/20 hover:bg-indigo-50/50 transition-all flex flex-col items-center justify-center text-center gap-3 min-h-[220px] group cursor-pointer"
+                >
+                  <div className="w-12 h-12 rounded-2xl bg-indigo-100 group-hover:bg-indigo-600 text-indigo-600 group-hover:text-white flex items-center justify-center transition-all shadow-xs">
+                    <Plus className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <span className="font-extrabold text-base text-indigo-950 block">
+                      + Thêm Bộ Câu Hỏi {questionSets.length + 1}
+                    </span>
+                    <span className="text-xs text-zinc-500 mt-1 block max-w-[240px]">
+                      Chọn bộ có sẵn • Chọn từ ngân hàng đề • Hoặc tải file Excel, Word, PDF (Có chọn môn áp dụng)
+                    </span>
+                  </div>
+                </button>
               </div>
             )}
           </div>
 
-          {/* Upload Box */}
+          {/* Quick Upload & Multi-Format Import Box */}
           <div className="bg-white p-8 rounded-3xl border border-zinc-200 shadow-xs">
-            <div className="max-w-2xl mx-auto text-center space-y-4">
+            <div className="max-w-3xl mx-auto text-center space-y-5">
               <div className="w-16 h-16 bg-indigo-50 rounded-2xl flex items-center justify-center mx-auto text-indigo-600">
                 <FileSpreadsheet className="w-8 h-8" />
               </div>
               <h2 className="text-2xl font-bold text-zinc-900">
-                Tải Lên Bộ Câu Hỏi Mới Bằng File Excel
+                Nhập Bộ Câu Hỏi Bằng File Excel, Word (.docx), PDF (.pdf)
               </h2>
               <p className="text-zinc-500 text-sm">
-                Mỗi lần tải lên sẽ tự động lưu thành <strong>Bộ câu hỏi {questionSets.length + 1}</strong> (hoặc Thầy/Cô tự đặt tên). Hệ thống tự động đồng bộ câu hỏi lên Google Sheet và hỗ trợ chèn ảnh lưu về Google Drive.
+                Khi tải lên cần chọn <strong>Môn áp dụng</strong>. Mỗi lần tải lên sẽ lưu thành <strong>Bộ câu hỏi {questionSets.length + 1}</strong> (hoặc bấm nút <strong>"+ Thêm Bộ Câu Hỏi Mới"</strong> để chọn từ kho đề có sẵn / ngân hàng câu hỏi).
               </p>
 
-              {/* Set Title & Auto-Activate Options */}
-              <div className="bg-zinc-50 p-4 rounded-2xl border border-zinc-200/80 text-left space-y-3">
-                <div>
-                  <label className="block text-xs font-bold text-zinc-700 uppercase mb-1">
-                    Tên bộ câu hỏi mới (Tùy chọn)
-                  </label>
-                  <input
-                    type="text"
-                    value={newSetNameInput}
-                    onChange={(e) => setNewSetNameInput(e.target.value)}
-                    placeholder={`Bộ câu hỏi ${questionSets.length + 1} (Để trống hệ thống sẽ tự đặt số thứ tự)`}
-                    className="w-full px-3.5 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm font-semibold focus:outline-hidden focus:border-indigo-600"
-                  />
+              {/* Subject Selection + Set Title & Auto-Activate Options */}
+              <div className="bg-zinc-50 p-5 rounded-2xl border border-zinc-200/80 text-left space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-indigo-900 uppercase mb-1.5">
+                      1. Chọn Môn Áp Dụng (Bắt buộc khi tải lên) *
+                    </label>
+                    <select
+                      value={selectedSubject}
+                      onChange={(e) => setSelectedSubject(e.target.value)}
+                      className={`w-full px-3.5 py-2.5 bg-white border-2 rounded-xl text-sm font-bold focus:outline-hidden ${
+                        selectedSubject ? 'border-emerald-500 text-emerald-950' : 'border-amber-400 text-zinc-700'
+                      }`}
+                    >
+                      <option value="">-- Chọn môn học áp dụng --</option>
+                      {SUBJECT_LIST.map(subj => (
+                        <option key={subj} value={subj}>{subj}</option>
+                      ))}
+                    </select>
+                    {selectedSubject === 'Môn tổng hợp / Khác' && (
+                      <input
+                        type="text"
+                        value={customSubjectInput}
+                        onChange={(e) => setCustomSubjectInput(e.target.value)}
+                        placeholder="Nhập tên môn học cụ thể..."
+                        className="mt-2 w-full px-3.5 py-2 bg-white border border-indigo-300 rounded-xl text-xs font-semibold"
+                      />
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-zinc-700 uppercase mb-1.5">
+                      2. Tên bộ câu hỏi mới (Tùy chọn)
+                    </label>
+                    <input
+                      type="text"
+                      value={newSetNameInput}
+                      onChange={(e) => setNewSetNameInput(e.target.value)}
+                      placeholder={`Bộ câu hỏi ${questionSets.length + 1}${selectedSubject ? ` - ${selectedSubject}` : ''}`}
+                      className="w-full px-3.5 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm font-semibold focus:outline-hidden focus:border-indigo-600"
+                    />
+                  </div>
                 </div>
 
-                <label className="flex items-center gap-2.5 cursor-pointer text-xs font-semibold text-zinc-700 select-none">
+                <label className="flex items-center gap-2.5 cursor-pointer text-xs font-semibold text-zinc-700 select-none pt-1">
                   <input
                     type="checkbox"
                     checked={autoActivateUploadedSet}
@@ -1949,45 +2949,88 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
               {/* Action Buttons */}
               <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
                 <button
+                  type="button"
                   onClick={downloadQuestionTemplate}
-                  className="px-5 py-3 bg-white hover:bg-zinc-50 border border-zinc-200 text-zinc-700 font-bold text-sm rounded-xl transition-all flex items-center gap-2 shadow-xs"
+                  className="px-4 py-2.5 bg-white hover:bg-zinc-50 border border-zinc-200 text-zinc-700 font-bold text-xs sm:text-sm rounded-xl transition-all flex items-center gap-2 shadow-xs"
                 >
                   <Download className="w-4 h-4 text-emerald-600" />
-                  <span>Tải File Excel Mẫu (.xlsx)</span>
+                  <span>Tải Mẫu Excel (.xlsx)</span>
                 </button>
 
-                <label className="px-5 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm rounded-xl transition-all flex items-center gap-2 shadow-md cursor-pointer">
+                <button
+                  type="button"
+                  onClick={downloadWordTemplate}
+                  className="px-4 py-2.5 bg-white hover:bg-zinc-50 border border-zinc-200 text-zinc-700 font-bold text-xs sm:text-sm rounded-xl transition-all flex items-center gap-2 shadow-xs"
+                >
+                  <FileText className="w-4 h-4 text-blue-600" />
+                  <span>Tải Mẫu Word (.doc)</span>
+                </button>
+
+                <label
+                  onClick={(e) => {
+                    if (!getEffectiveSubject()) {
+                      e.preventDefault();
+                      showToast('error', '⚠️ Vui lòng chọn MÔN ÁP DỤNG ở mục số 1 trước khi chọn file tải lên!');
+                      setExcelStatusMessage({
+                        type: 'error',
+                        text: '⚠️ Vui lòng chọn MÔN ÁP DỤNG ở mục số 1 trước khi chọn file Excel, Word hoặc PDF để tải lên!'
+                      });
+                    }
+                  }}
+                  className="px-5 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs sm:text-sm rounded-xl transition-all flex items-center gap-2 shadow-md cursor-pointer"
+                >
                   {uploadingExcel ? (
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                   ) : (
                     <Upload className="w-4 h-4" />
                   )}
-                  <span>{uploadingExcel ? 'Đang nhập dữ liệu...' : 'Chọn File Excel Để Tải Lên'}</span>
+                  <span>
+                    {uploadingExcel
+                      ? 'Đang phân tích file...'
+                      : 'Tải Lên File Excel / Word / PDF'}
+                  </span>
                   <input
                     type="file"
-                    accept=".xlsx, .xls, .csv"
-                    onChange={handleImportQuestionsExcel}
+                    accept=".xlsx, .xls, .csv, .docx, .doc, .pdf"
+                    onChange={(e) => {
+                      setImportTargetSetId(null);
+                      handleImportQuestionsExcel(e);
+                    }}
                     disabled={uploadingExcel}
                     className="hidden"
                   />
                 </label>
 
                 <button
+                  type="button"
+                  onClick={() => {
+                    setImportTargetSetId(null);
+                    setNewSetNameInput(`Bộ câu hỏi ${questionSets.length + 1}`);
+                    setShowAddSetModal(true);
+                  }}
+                  className="px-5 py-3 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs sm:text-sm rounded-xl transition-all flex items-center gap-2 shadow-md"
+                >
+                  <Layers className="w-4 h-4" />
+                  <span>Chọn Từ Bộ Có Sẵn / Ngân Hàng Đề</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setShowAddQuestionModal(true)}
-                  className="px-5 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm rounded-xl transition-all flex items-center gap-2 shadow-md"
+                  className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs sm:text-sm rounded-xl transition-all flex items-center gap-2 shadow-md"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>Thêm Câu Hỏi Kèm Hình Ảnh (Trực Tiếp)</span>
+                  <span>Thêm 1 Câu Hỏi Kèm Ảnh</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={handleSyncAllQuestionsToSheet}
                   disabled={syncingQuestionsSheet}
-                  className="px-5 py-3 bg-purple-600 hover:bg-purple-700 text-white font-bold text-sm rounded-xl transition-all flex items-center gap-2 shadow-md disabled:opacity-50"
+                  className="px-4 py-2.5 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs sm:text-sm rounded-xl transition-all flex items-center gap-2 shadow-md disabled:opacity-50"
                 >
                   <FileSpreadsheet className={`w-4 h-4 ${syncingQuestionsSheet ? 'animate-spin' : ''}`} />
-                  <span>{syncingQuestionsSheet ? 'Đang lưu lên Google Sheet...' : 'Lưu Toàn Bộ Câu Hỏi Lên Google Sheet'}</span>
+                  <span>{syncingQuestionsSheet ? 'Đang lưu Sheet...' : 'Lưu Toàn Bộ Lên Sheet'}</span>
                 </button>
               </div>
 
@@ -2637,6 +3680,515 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ================= MODAL THÊM BỘ CÂU HỎI ĐA HÌNH THỨC DÀNH CHO GIÁO VIÊN ================= */}
+      {showAddSetModal && (
+            <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+              <div className="bg-white max-w-4xl w-full rounded-3xl p-6 sm:p-8 shadow-2xl space-y-6 my-8 max-h-[92vh] overflow-y-auto">
+                {/* Modal Header */}
+                <div className="flex items-start justify-between gap-4 border-b border-zinc-100 pb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 bg-indigo-100 text-indigo-700 rounded-2xl flex items-center justify-center shrink-0">
+                      <BookOpen className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <h3 className="text-xl sm:text-2xl font-extrabold text-zinc-900">
+                        {importTargetSetId
+                          ? `Nhập Thêm Câu Hỏi Vào "${questionSets.find(s => s.id === importTargetSetId)?.title}"`
+                          : 'Thêm Bộ Câu Hỏi Dành Cho Giáo Viên'}
+                      </h3>
+                      <p className="text-xs sm:text-sm text-zinc-500 mt-0.5">
+                        Lựa chọn linh hoạt: Chọn bộ câu hỏi có sẵn • Chọn từ ngân hàng tạo bộ mới • Tự tải file Excel, Word, PDF (Kèm chọn môn áp dụng)
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAddSetModal(false);
+                      setImportTargetSetId(null);
+                    }}
+                    className="p-2 text-zinc-400 hover:text-zinc-700 rounded-xl bg-zinc-100 hover:bg-zinc-200 transition-colors"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                {/* Common Step: Choose Subject & Set Title */}
+                <div className="p-4 sm:p-5 bg-indigo-50/60 border border-indigo-200 rounded-2xl space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-extrabold text-indigo-950 uppercase mb-1.5">
+                        📚 Môn học áp dụng (Bắt buộc chọn) *
+                      </label>
+                      <select
+                        value={selectedSubject}
+                        onChange={(e) => setSelectedSubject(e.target.value)}
+                        className={`w-full px-3.5 py-2.5 bg-white border-2 rounded-xl text-sm font-bold focus:outline-hidden ${
+                          selectedSubject ? 'border-emerald-500 text-emerald-950' : 'border-amber-400 text-zinc-700'
+                        }`}
+                      >
+                        <option value="">-- Chọn môn áp dụng --</option>
+                        {SUBJECT_LIST.map(subj => (
+                          <option key={subj} value={subj}>{subj}</option>
+                        ))}
+                      </select>
+                      {selectedSubject === 'Môn tổng hợp / Khác' && (
+                        <input
+                          type="text"
+                          value={customSubjectInput}
+                          onChange={(e) => setCustomSubjectInput(e.target.value)}
+                          placeholder="Nhập tên môn học cụ thể..."
+                          className="mt-2 w-full px-3 py-2 bg-white border border-indigo-300 rounded-xl text-xs font-semibold"
+                        />
+                      )}
+                    </div>
+
+                    {!importTargetSetId && (
+                      <div>
+                        <label className="block text-xs font-extrabold text-indigo-950 uppercase mb-1.5">
+                          🏷️ Tên bộ câu hỏi mới
+                        </label>
+                        <input
+                          type="text"
+                          value={newSetNameInput}
+                          onChange={(e) => setNewSetNameInput(e.target.value)}
+                          placeholder={`Bộ câu hỏi ${questionSets.length + 1}${selectedSubject ? ` - ${selectedSubject}` : ''}`}
+                          className="w-full px-3.5 py-2.5 bg-white border border-indigo-200 rounded-xl text-sm font-semibold focus:outline-hidden focus:border-indigo-600"
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  {!importTargetSetId && (
+                    <label className="flex items-center gap-2 cursor-pointer text-xs font-bold text-indigo-950 select-none">
+                      <input
+                        type="checkbox"
+                        checked={autoActivateUploadedSet}
+                        onChange={(e) => setAutoActivateUploadedSet(e.target.checked)}
+                        className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+                      />
+                      <span>Kích hoạt cho Học sinh làm bộ câu hỏi này ngay sau khi tạo</span>
+                    </label>
+                  )}
+                </div>
+
+                {/* Mode Switcher Tabs (3 Hình thức lựa chọn câu hỏi cho GV) */}
+                {!importTargetSetId && (
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 p-1.5 bg-zinc-100 rounded-2xl">
+                    <button
+                      type="button"
+                      onClick={() => setAddSetMode('preset')}
+                      className={`py-3 px-4 rounded-xl text-xs sm:text-sm font-extrabold transition-all flex items-center justify-center gap-2 ${
+                        addSetMode === 'preset'
+                          ? 'bg-white text-indigo-700 shadow-sm ring-1 ring-indigo-200'
+                          : 'text-zinc-600 hover:text-zinc-900'
+                      }`}
+                    >
+                      <BookOpen className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>1. Chọn Bộ Có Sẵn</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setAddSetMode('bank')}
+                      className={`py-3 px-4 rounded-xl text-xs sm:text-sm font-extrabold transition-all flex items-center justify-center gap-2 ${
+                        addSetMode === 'bank'
+                          ? 'bg-white text-indigo-700 shadow-sm ring-1 ring-indigo-200'
+                          : 'text-zinc-600 hover:text-zinc-900'
+                      }`}
+                    >
+                      <Layers className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>2. Chọn Từ Ngân Hàng Đề</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setAddSetMode('upload')}
+                      className={`py-3 px-4 rounded-xl text-xs sm:text-sm font-extrabold transition-all flex items-center justify-center gap-2 ${
+                        addSetMode === 'upload'
+                          ? 'bg-white text-indigo-700 shadow-sm ring-1 ring-indigo-200'
+                          : 'text-zinc-600 hover:text-zinc-900'
+                      }`}
+                    >
+                      <Upload className="w-4 h-4 text-indigo-600 shrink-0" />
+                      <span>3. Tự Tải Lên (Excel/Word/PDF)</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* ================= HÌNH THỨC 1: CHỌN BỘ CÂU HỎI CÓ SẴN ================= */}
+                {addSetMode === 'preset' && !importTargetSetId && (
+                  <div className="space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div>
+                        <h4 className="font-bold text-zinc-900 text-sm sm:text-base">
+                          Kho Bộ Câu Hỏi Có Sẵn Theo Môn Học
+                        </h4>
+                        <p className="text-xs text-zinc-500">
+                          Bấm <strong>"Chọn Bộ Đề Này"</strong> để sao chép thành một bộ câu hỏi mới của Thầy/Cô (hỗ trợ chỉnh sửa và chèn ảnh thêm).
+                        </p>
+                      </div>
+
+                      <select
+                        value={presetFilterSubject}
+                        onChange={(e) => setPresetFilterSubject(e.target.value)}
+                        className="px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-bold text-zinc-700"
+                      >
+                        <option value="all">Tất cả các môn</option>
+                        {SUBJECT_LIST.map(subj => (
+                          <option key={subj} value={subj}>{subj}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {PRESET_QUESTION_SETS.filter(
+                        p => presetFilterSubject === 'all' || p.subject === presetFilterSubject
+                      ).map(preset => {
+                        const totalQ = preset.mcqs.length + preset.tfs.length + preset.sas.length;
+                        return (
+                          <div
+                            key={preset.id}
+                            className="p-4 rounded-2xl border border-zinc-200 hover:border-indigo-400 bg-zinc-50/50 hover:bg-white transition-all flex flex-col justify-between gap-3 shadow-2xs"
+                          >
+                            <div className="space-y-2">
+                              <div className="flex items-start justify-between gap-2">
+                                <span className="px-2.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-xs font-extrabold">
+                                  Môn: {preset.subject}
+                                </span>
+                                <span className="text-xs font-bold text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded-full">
+                                  {totalQ} câu hỏi
+                                </span>
+                              </div>
+                              <h5 className="font-bold text-zinc-900 text-sm sm:text-base">
+                                {preset.title}
+                              </h5>
+                              <p className="text-xs text-zinc-500 leading-relaxed">
+                                {preset.description}
+                              </p>
+                              <div className="text-[11px] text-zinc-600 font-semibold bg-white p-2 rounded-xl border border-zinc-200/80">
+                                Cấu trúc: {preset.mcqs.length} Trắc nghiệm • {preset.tfs.length} Đúng/Sai • {preset.sas.length} Trả lời ngắn
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              disabled={creatingSetLoading}
+                              onClick={() => handleUsePresetSet(preset)}
+                              className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-xs transition-all disabled:opacity-50"
+                            >
+                              <CheckCircle2 className="w-4 h-4" />
+                              <span>Chọn Bộ Có Sẵn Này Làm Bộ Đề Mới</span>
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Also allow cloning from existing sets in the system if any */}
+                    {questionSets.length > 0 && (
+                      <div className="pt-4 border-t border-zinc-100 space-y-3">
+                        <h5 className="text-xs font-bold uppercase tracking-wider text-zinc-500">
+                          Hoặc nhân bản từ các bộ câu hỏi đã tạo trên hệ thống ({questionSets.length})
+                        </h5>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {questionSets.map(existing => (
+                            <div
+                              key={existing.id}
+                              className="p-3.5 rounded-xl border border-zinc-200 bg-white flex items-center justify-between gap-3"
+                            >
+                              <div className="min-w-0">
+                                <div className="font-bold text-xs sm:text-sm text-zinc-900 truncate">
+                                  {existing.title}
+                                </div>
+                                <div className="text-[11px] text-zinc-500">
+                                  {existing.subject ? `Môn: ${existing.subject} • ` : ''}{existing.totalQuestions} câu hỏi
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                disabled={creatingSetLoading}
+                                onClick={() =>
+                                  handleUsePresetSet({
+                                    title: existing.title,
+                                    subject: existing.subject || getEffectiveSubject() || 'Tin học',
+                                    description: `Nhân bản từ ${existing.title}`,
+                                    mcqs: existing.mcqs || [],
+                                    tfs: existing.tfs || [],
+                                    sas: existing.sas || []
+                                  })
+                                }
+                                className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-600 text-indigo-700 hover:text-white rounded-lg text-xs font-bold shrink-0 transition-all"
+                              >
+                                Dùng bộ này
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ================= HÌNH THỨC 2: CHỌN TỪ NGÂN HÀNG TẠO BỘ MỚI ================= */}
+                {addSetMode === 'bank' && !importTargetSetId && (
+                  <div className="space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-amber-50/70 border border-amber-200 p-3.5 rounded-2xl">
+                      <div>
+                        <span className="text-xs sm:text-sm font-bold text-amber-950 block">
+                          Đã chọn: <strong className="text-indigo-700 text-base">{selectedBankQuestionIds.length}</strong> câu hỏi từ Ngân hàng đề
+                        </span>
+                        <span className="text-[11px] text-amber-800">
+                          Tích chọn từng câu hỏi bên dưới hoặc bấm nút chọn ngẫu nhiên theo cấu trúc chuẩn.
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleAutoPickStandardStructureFromBank}
+                          className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold shadow-2xs transition-all"
+                        >
+                          ⚡ Chọn ngẫu nhiên chuẩn cấu trúc
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedBankQuestionIds(questionList.map(q => q.id))}
+                          className="px-3 py-1.5 bg-white hover:bg-zinc-100 text-zinc-700 border border-zinc-200 rounded-xl text-xs font-bold"
+                        >
+                          Chọn tất cả ({questionList.length})
+                        </button>
+                        {selectedBankQuestionIds.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setSelectedBankQuestionIds([])}
+                            className="px-2.5 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-xl text-xs font-bold"
+                          >
+                            Bỏ chọn
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Bank Filters */}
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
+                      <div className="sm:col-span-5 relative">
+                        <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          value={bankSearchKeyword}
+                          onChange={(e) => setBankSearchKeyword(e.target.value)}
+                          placeholder="Tìm nội dung câu hỏi trong ngân hàng..."
+                          className="w-full pl-9 pr-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-xs"
+                        />
+                      </div>
+
+                      <div className="sm:col-span-4">
+                        <select
+                          value={bankFilterSubject}
+                          onChange={(e) => setBankFilterSubject(e.target.value)}
+                          className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-bold text-zinc-700"
+                        >
+                          <option value="all">Tất cả môn trong ngân hàng</option>
+                          {SUBJECT_LIST.map(subj => (
+                            <option key={subj} value={subj}>Môn: {subj}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="sm:col-span-3">
+                        <select
+                          value={bankFilterType}
+                          onChange={(e) => setBankFilterType(e.target.value as any)}
+                          className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-xl text-xs font-bold text-zinc-700"
+                        >
+                          <option value="all">Mọi loại câu hỏi</option>
+                          <option value="mcq">Trắc nghiệm 4 lựa chọn</option>
+                          <option value="tf">Đúng / Sai (4 ý)</option>
+                          <option value="sa">Trả lời ngắn</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Selectable Question List */}
+                    <div className="border border-zinc-200 rounded-2xl max-h-72 overflow-y-auto divide-y divide-zinc-100">
+                      {questionList
+                        .filter(q => {
+                          if (bankFilterType !== 'all' && q.type !== bankFilterType) return false;
+                          if (bankFilterSubject !== 'all' && (q.details?.subject || '') !== bankFilterSubject) return false;
+                          if (bankSearchKeyword.trim() && !q.text.toLowerCase().includes(bankSearchKeyword.toLowerCase())) return false;
+                          return true;
+                        })
+                        .map((q, idx) => {
+                          const checked = selectedBankQuestionIds.includes(q.id);
+                          return (
+                            <label
+                              key={q.id || idx}
+                              className={`p-3 flex items-start gap-3 cursor-pointer transition-colors ${
+                                checked ? 'bg-indigo-50/70' : 'hover:bg-zinc-50'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedBankQuestionIds(prev => [...prev, q.id]);
+                                  } else {
+                                    setSelectedBankQuestionIds(prev => prev.filter(id => id !== q.id));
+                                  }
+                                }}
+                                className="mt-1 w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500"
+                              />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex flex-wrap items-center gap-1.5 mb-0.5">
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                    q.type === 'mcq' ? 'bg-emerald-100 text-emerald-800' :
+                                    q.type === 'tf' ? 'bg-indigo-100 text-indigo-800' : 'bg-amber-100 text-amber-800'
+                                  }`}>
+                                    {q.type === 'mcq' ? 'Trắc nghiệm' : q.type === 'tf' ? 'Đúng/Sai' : 'Trả lời ngắn'}
+                                  </span>
+                                  {q.details?.subject && (
+                                    <span className="px-2 py-0.5 rounded bg-zinc-100 text-zinc-700 text-[10px] font-bold">
+                                      {q.details.subject}
+                                    </span>
+                                  )}
+                                  {q.details?.setTitle && (
+                                    <span className="text-[10px] text-zinc-400">
+                                      ({q.details.setTitle})
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-xs sm:text-sm text-zinc-800 font-medium line-clamp-2">
+                                  {q.text}
+                                </p>
+                              </div>
+                            </label>
+                          );
+                        })}
+                    </div>
+
+                    <div className="flex items-center justify-end gap-3 pt-2">
+                      <button
+                        type="button"
+                        disabled={creatingSetLoading || selectedBankQuestionIds.length === 0}
+                        onClick={handleCreateSetFromBank}
+                        className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs sm:text-sm shadow-md flex items-center gap-2 disabled:opacity-50"
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>
+                          {creatingSetLoading
+                            ? 'Đang tạo bộ câu hỏi...'
+                            : `Tạo Bộ Câu Hỏi Mới Từ ${selectedBankQuestionIds.length} Câu Đã Chọn`}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* ================= HÌNH THỨC 3: TỰ TẢI BỘ CÂU HỎI LÊN (EXCEL, WORD, PDF) ================= */}
+                {(addSetMode === 'upload' || importTargetSetId) && (
+                  <div className="space-y-5">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-left">
+                      <div className="p-4 rounded-2xl border border-emerald-200 bg-emerald-50/50 space-y-1">
+                        <div className="font-extrabold text-xs sm:text-sm text-emerald-900 flex items-center gap-1.5">
+                          <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                          <span>File Excel (.xlsx, .xls, .csv)</span>
+                        </div>
+                        <p className="text-[11px] text-emerald-800 leading-relaxed">
+                          Hỗ trợ đầy đủ 3 sheet (Trắc nghiệm, Đúng/Sai, Trả lời ngắn) hoặc bảng 1 sheet chuẩn.
+                        </p>
+                      </div>
+
+                      <div className="p-4 rounded-2xl border border-blue-200 bg-blue-50/50 space-y-1">
+                        <div className="font-extrabold text-xs sm:text-sm text-blue-900 flex items-center gap-1.5">
+                          <FileText className="w-4 h-4 text-blue-600" />
+                          <span>File Word (.docx, .doc)</span>
+                        </div>
+                        <p className="text-[11px] text-blue-800 leading-relaxed">
+                          Tự động nhận diện câu hỏi bắt đầu bằng <code>Câu 1:</code>, các phương án <code>A. B. C. D.</code> (đánh dấu <code>*A.</code> hoặc dòng <code>Đáp án: A</code>).
+                        </p>
+                      </div>
+
+                      <div className="p-4 rounded-2xl border border-rose-200 bg-rose-50/50 space-y-1">
+                        <div className="font-extrabold text-xs sm:text-sm text-rose-900 flex items-center gap-1.5">
+                          <FileText className="w-4 h-4 text-rose-600" />
+                          <span>File PDF (.pdf)</span>
+                        </div>
+                        <p className="text-[11px] text-rose-800 leading-relaxed">
+                          Trích xuất văn bản trực tiếp từ đề PDF có cấu trúc <code>Câu 1: ... A. ... B. ... C. ... D. ... Đáp án: ...</code>
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Upload Dropzone */}
+                    <div className="p-6 border-2 border-dashed border-indigo-300 rounded-2xl bg-indigo-50/30 text-center space-y-4">
+                      <Upload className="w-10 h-10 text-indigo-600 mx-auto" />
+                      <div className="space-y-1">
+                        <h4 className="font-extrabold text-base text-zinc-900">
+                          Chọn File Đề Thi Từ Máy Tính (Excel, Word, PDF)
+                        </h4>
+                        <p className="text-xs text-zinc-500">
+                          Định dạng hỗ trợ: <strong>.xlsx, .xls, .csv, .docx, .doc, .pdf</strong>
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-center gap-3">
+                        <label
+                          onClick={(e) => {
+                            if (!getEffectiveSubject() && !importTargetSetId) {
+                              e.preventDefault();
+                              showToast('error', '⚠️ Vui lòng chọn MÔN ÁP DỤNG ở khung phía trên trước khi tải file lên!');
+                            }
+                          }}
+                          className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs sm:text-sm rounded-xl inline-flex items-center gap-2 shadow-md cursor-pointer transition-all"
+                        >
+                          {uploadingExcel ? (
+                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          ) : (
+                            <Upload className="w-4 h-4" />
+                          )}
+                          <span>
+                            {uploadingExcel
+                              ? 'Đang đọc và tách câu hỏi...'
+                              : 'Chọn File Excel / Word / PDF Để Tải Lên'}
+                          </span>
+                          <input
+                            type="file"
+                            accept=".xlsx, .xls, .csv, .docx, .doc, .pdf"
+                            onChange={handleImportQuestionsExcel}
+                            disabled={uploadingExcel}
+                            className="hidden"
+                          />
+                        </label>
+
+                        <button
+                          type="button"
+                          onClick={downloadQuestionTemplate}
+                          className="px-4 py-2.5 bg-white hover:bg-zinc-50 border border-zinc-200 text-zinc-700 font-bold text-xs rounded-xl inline-flex items-center gap-1.5"
+                        >
+                          <Download className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Tải Mẫu Excel</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={downloadWordTemplate}
+                          className="px-4 py-2.5 bg-white hover:bg-zinc-50 border border-zinc-200 text-zinc-700 font-bold text-xs rounded-xl inline-flex items-center gap-1.5"
+                        >
+                          <Download className="w-3.5 h-3.5 text-blue-600" />
+                          <span>Tải Mẫu Word (.doc)</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Lightbox Preview Modal for Questions Tab */}
           {selectedImagePreview && (
@@ -2660,8 +4212,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
               </div>
             </div>
           )}
-        </div>
-      )}
 
       {/* ================= TAB 3: KẾT QUẢ CẢ LỚP (CHỈ GV XEM ĐƯỢC) ================= */}
       {activeTab === 'results' && (

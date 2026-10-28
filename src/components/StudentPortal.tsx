@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../firebase';
-import { collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore';
-import { StudentUser, QuizResult, QuestionSet, MCQQuestion, TFQuestion, SAQuestion } from '../types';
+import { collection, query, where, getDocs, getDoc, doc, limit } from 'firebase/firestore';
+import { StudentUser, QuizResult, QuestionSet, ClassItem } from '../types';
 import { ChangePasswordModal } from './StudentAuthModal';
 import { UserGuideModal } from './UserGuideModal';
 import { 
@@ -37,29 +37,85 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({
   const [studentResult, setStudentResult] = useState<QuizResult | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Fetch active question set for this student's teacher & check if taken
+  // Fetch the ONLY question set selected for this student's class (HS chỉ thấy bộ câu hỏi đã chọn, không thể thấy bộ câu hỏi khác)
   useEffect(() => {
     const fetchActiveSetAndResult = async () => {
       try {
         setLoading(true);
         let chosenSet: QuestionSet | null = null;
+        let classDocData: ClassItem | null = null;
 
-        // 1. Fetch active question set of this student's teacher
-        if (student.teacherId) {
-          const qTeacher = query(
-            collection(db, 'question_sets'),
-            where('teacherId', '==', student.teacherId),
-            where('isActive', '==', true),
-            limit(1)
-          );
-          const snapTeacher = await getDocs(qTeacher);
-          if (!snapTeacher.empty) {
-            chosenSet = { id: snapTeacher.docs[0].id, ...snapTeacher.docs[0].data() } as QuestionSet;
+        // 1. Check the student's Class document first (Sau khi vào lớp, GV chọn bộ câu hỏi để lớp làm bài)
+        if (student.classId) {
+          const classRef = await getDoc(doc(db, 'classes', student.classId));
+          if (classRef.exists()) {
+            classDocData = { id: classRef.id, ...(classRef.data() as any) } as ClassItem;
+          }
+        }
+        if (!classDocData && student.className) {
+          const qClass = student.teacherId
+            ? query(
+                collection(db, 'classes'),
+                where('name', '==', student.className),
+                where('teacherId', '==', student.teacherId),
+                limit(1)
+              )
+            : query(
+                collection(db, 'classes'),
+                where('name', '==', student.className),
+                limit(1)
+              );
+          const snapClass = await getDocs(qClass);
+          if (!snapClass.empty) {
+            classDocData = { id: snapClass.docs[0].id, ...(snapClass.docs[0].data() as any) } as ClassItem;
           }
         }
 
-        // 2. Fallback to any active set
-        if (!chosenSet) {
+        // 2. Determine the student's teacher ID from student record or class document
+        const ownerTeacherId = student.teacherId || classDocData?.teacherId || '';
+
+        // 3. If the class has an explicit assignedSetId (either a specific set ID or '' when closed)
+        if (classDocData && classDocData.assignedSetId !== undefined) {
+          if (classDocData.assignedSetId) {
+            const setSnap = await getDoc(doc(db, 'question_sets', classDocData.assignedSetId));
+            if (setSnap.exists()) {
+              chosenSet = { id: setSnap.id, ...(setSnap.data() as any) } as QuestionSet;
+            }
+          } else {
+            // Teacher explicitly closed/unassigned question sets for this class
+            chosenSet = null;
+          }
+        } else if (ownerTeacherId) {
+          // 4. Check the student's Teacher profile document first (teachers/{ownerTeacherId}.activeSetId)
+          const teacherRef = await getDoc(doc(db, 'teachers', ownerTeacherId)).catch(() => null);
+          if (teacherRef && teacherRef.exists()) {
+            const teacherActiveSetId = teacherRef.data()?.activeSetId;
+            if (teacherActiveSetId !== undefined) {
+              if (teacherActiveSetId) {
+                const setSnap = await getDoc(doc(db, 'question_sets', teacherActiveSetId));
+                if (setSnap.exists()) {
+                  chosenSet = { id: setSnap.id, ...(setSnap.data() as any) } as QuestionSet;
+                }
+              } else {
+                chosenSet = null;
+              }
+            }
+          }
+
+          // 5. Fallback: check question_sets belonging specifically to THIS student's teacher
+          if (chosenSet === null && (!teacherRef || !teacherRef.exists() || teacherRef.data()?.activeSetId === undefined)) {
+            const qTeacher = query(
+              collection(db, 'question_sets'),
+              where('teacherId', '==', ownerTeacherId)
+            );
+            const snapTeacher = await getDocs(qTeacher);
+            const activeTeacherDoc = snapTeacher.docs.find(d => d.data()?.isActive === true);
+            if (activeTeacherDoc) {
+              chosenSet = { id: activeTeacherDoc.id, ...(activeTeacherDoc.data() as any) } as QuestionSet;
+            }
+          }
+        } else {
+          // Only if student has no teacherId and no class teacherId at all
           const qAny = query(
             collection(db, 'question_sets'),
             where('isActive', '==', true),
@@ -67,39 +123,13 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({
           );
           const snapAny = await getDocs(qAny);
           if (!snapAny.empty) {
-            chosenSet = { id: snapAny.docs[0].id, ...snapAny.docs[0].data() } as QuestionSet;
-          }
-        }
-
-        // 3. Fallback: check legacy questions
-        if (!chosenSet) {
-          const [mcqSnap, tfSnap, saSnap] = await Promise.all([
-            getDocs(query(collection(db, 'questions_mcq'), limit(16))),
-            getDocs(query(collection(db, 'questions_tf'), limit(4))),
-            getDocs(query(collection(db, 'questions_sa'), limit(4)))
-          ]);
-          const legacyMcqs = mcqSnap.docs.map(d => ({ id: d.id, ...d.data() } as MCQQuestion));
-          const legacyTfs = tfSnap.docs.map(d => ({ id: d.id, ...d.data() } as TFQuestion));
-          const legacySas = saSnap.docs.map(d => ({ id: d.id, ...d.data() } as SAQuestion));
-          const total = legacyMcqs.length + legacyTfs.length + legacySas.length;
-          if (total > 0) {
-            chosenSet = {
-              id: 'legacy_set_1',
-              title: 'Bộ câu hỏi 1 (Mặc định)',
-              teacherId: student.teacherId || 'admin',
-              isActive: true,
-              mcqs: legacyMcqs,
-              tfs: legacyTfs,
-              sas: legacySas,
-              totalQuestions: total,
-              createdAt: new Date().toISOString()
-            };
+            chosenSet = { id: snapAny.docs[0].id, ...(snapAny.docs[0].data() as any) } as QuestionSet;
           }
         }
 
         setActiveSet(chosenSet);
 
-        // If an active set exists, check if student completed THIS set
+        // If an active set exists for this class, check if student completed THIS set
         if (chosenSet) {
           const qRes = query(
             collection(db, 'quiz_results'),
@@ -109,7 +139,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({
           );
           const snapRes = await getDocs(qRes);
           if (!snapRes.empty) {
-            setStudentResult({ id: snapRes.docs[0].id, ...snapRes.docs[0].data() } as QuizResult);
+            setStudentResult({ id: snapRes.docs[0].id, ...(snapRes.docs[0].data() as any) } as QuizResult);
           } else {
             setStudentResult(null);
           }

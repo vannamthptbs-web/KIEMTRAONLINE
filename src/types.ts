@@ -1,11 +1,30 @@
 export type QuestionType = 'mcq' | 'tf' | 'sa';
 
+export const SUBJECT_LIST = [
+  'Tin học',
+  'Toán học',
+  'Vật lí',
+  'Hóa học',
+  'Sinh học',
+  'Ngữ văn',
+  'Tiếng Anh',
+  'Lịch sử',
+  'Địa lí',
+  'GDKT & Pháp luật',
+  'Công nghệ',
+  'Giáo dục quốc phòng',
+  'Khoa học tự nhiên',
+  'Lịch sử & Địa lí',
+  'Môn tổng hợp / Khác'
+];
+
 export interface MCQQuestion {
   id?: string;
   text: string;
   imageUrl?: string;
   options: string[];
   correctAnswerIndex: number;
+  subject?: string;
   createdAt: string;
 }
 
@@ -19,6 +38,7 @@ export interface TFQuestion {
   text: string;
   imageUrl?: string;
   statements: TFStatement[];
+  subject?: string;
   createdAt: string;
 }
 
@@ -27,6 +47,7 @@ export interface SAQuestion {
   text: string;
   imageUrl?: string;
   correctAnswers: string[];
+  subject?: string;
   createdAt: string;
 }
 
@@ -42,6 +63,8 @@ export interface QuizState {
 export interface QuestionSet {
   id: string;
   title: string; // "Bộ câu hỏi 1", "Bộ câu hỏi 2", etc.
+  subject?: string; // Môn áp dụng (Tin học, Toán học, Vật lí...)
+  sourceType?: 'excel' | 'word' | 'pdf' | 'bank' | 'preset' | 'manual';
   description?: string;
   teacherId: string;
   teacherName?: string;
@@ -66,6 +89,7 @@ export interface QuizResult {
   total: number;
   setId?: string; // ID của bộ câu hỏi
   setTitle?: string; // Tên bộ câu hỏi: "Bộ câu hỏi 1", "Bộ câu hỏi 2"...
+  subject?: string; // Môn học
   timestamp: any;
   userId?: string | null;
 }
@@ -106,7 +130,11 @@ export interface ClassItem {
   teacherId: string;
   teacherName?: string;
   studentCount?: number;
+  assignedSetId?: string; // ID bộ câu hỏi được chọn cho lớp này làm bài ('' nếu đang đóng)
+  assignedSetTitle?: string; // Tên bộ câu hỏi được chọn cho lớp này
+  assignedSetSubject?: string; // Môn học của bộ câu hỏi được chọn
   createdAt?: any;
+  updatedAt?: any;
 }
 
 export interface SystemSettings {
