@@ -68,6 +68,8 @@ export interface QuestionSet {
   description?: string;
   teacherId: string;
   teacherName?: string;
+  isShared?: boolean; // Phân loại: Bộ câu hỏi chung (true) hoặc Bộ câu hỏi của tôi (false)
+  scope?: 'personal' | 'shared';
   isActive: boolean; // Gv muốn HS làm bộ câu hỏi nào thì chọn bộ đó
   mcqs: MCQQuestion[];
   tfs: TFQuestion[];

@@ -88,6 +88,7 @@ import {
   Edit3
 } from 'lucide-react';
 import { UserGuideModal } from './UserGuideModal';
+import { QuestionSetEditorModal } from './QuestionSetEditorModal';
 
 interface TeacherDashboardProps {
   onBack: () => void;
@@ -150,6 +151,35 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
   const [presetFilterSubject, setPresetFilterSubject] = useState<string>('all');
   const [creatingSetLoading, setCreatingSetLoading] = useState<boolean>(false);
   const [newQSubject, setNewQSubject] = useState<string>('Tin học');
+  const [showSetEditorModal, setShowSetEditorModal] = useState<boolean>(false);
+  const [editorTargetSetId, setEditorTargetSetId] = useState<string | null>(null);
+  const [questionSetCategoryFilter, setQuestionSetCategoryFilter] = useState<'all' | 'mine' | 'shared'>('all');
+  const [newSetScope, setNewSetScope] = useState<'personal' | 'shared'>('personal');
+
+  // Helper to classify a QuestionSet into "Bộ câu hỏi của tôi" (true) vs "Bộ câu hỏi chung" (false)
+  const isQuestionSetMine = (s: QuestionSet): boolean => {
+    if (s.scope === 'personal') return s.teacherId === effectiveTeacherId;
+    if (s.scope === 'shared' || s.isShared === true) return false;
+    if (s.title === 'Bộ câu hỏi 1 (Mặc định)') return false;
+    return s.teacherId === effectiveTeacherId;
+  };
+
+  const myQuestionSets = questionSets.filter(s => isQuestionSetMine(s));
+  const sharedQuestionSets = questionSets.filter(s => !isQuestionSetMine(s));
+
+  // Inline Single Question Edit State (for Question Bank list)
+  const [editingBankQId, setEditingBankQId] = useState<string | null>(null);
+  const [editingBankQText, setEditingBankQText] = useState<string>('');
+  const [editingBankQOptions, setEditingBankQOptions] = useState<string[]>(['', '', '', '']);
+  const [editingBankQCorrectIdx, setEditingBankQCorrectIdx] = useState<number>(0);
+  const [editingBankQStatements, setEditingBankQStatements] = useState<Array<{ text: string; isTrue: boolean }>>([
+    { text: '', isTrue: true },
+    { text: '', isTrue: false },
+    { text: '', isTrue: true },
+    { text: '', isTrue: false }
+  ]);
+  const [editingBankQSAAnswers, setEditingBankQSAAnswers] = useState<string>('');
+  const [savingBankQ, setSavingBankQ] = useState<boolean>(false);
 
   // Questions with Image & Online Question Builder State
   const [showAddQuestionModal, setShowAddQuestionModal] = useState(false);
@@ -251,15 +281,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
   const fetchQuestionSets = async () => {
     try {
       setLoadingSets(true);
-      const q = isAdmin
-        ? collection(db, 'question_sets')
-        : query(
-            collection(db, 'question_sets'),
-            where('teacherId', '==', effectiveTeacherId)
-          );
-
-      const snap = await getDocs(q);
-      let sets: QuestionSet[] = snap.docs
+      const snap = await getDocs(collection(db, 'question_sets'));
+      let allRawSets: QuestionSet[] = snap.docs
         .map(d => ({ id: d.id, ...(d.data() as any) } as QuestionSet))
         .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
 
@@ -272,7 +295,31 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
         }
       }
 
-      // Auto-initialize a personal "Bộ câu hỏi 1 (Mặc định)" for this teacher if they have 0 sets yet
+      // Deduplicate redundant auto-created "Bộ câu hỏi 1 (Mặc định)" sets so only 1 clean default set appears in "Bộ câu hỏi chung"
+      const defaultTitleSets = allRawSets.filter(s => s.title === 'Bộ câu hỏi 1 (Mặc định)');
+      let canonicalDefaultSet: QuestionSet | null = null;
+      if (defaultTitleSets.length > 0) {
+        canonicalDefaultSet =
+          (savedTeacherActiveSetId ? defaultTitleSets.find(s => s.id === savedTeacherActiveSetId) : undefined) ||
+          defaultTitleSets.find(s => s.teacherId === effectiveTeacherId && s.isActive) ||
+          defaultTitleSets.find(s => s.isActive) ||
+          defaultTitleSets[0];
+      }
+
+      let sets: QuestionSet[] = [];
+      let addedCanonicalDefault = false;
+      for (const s of allRawSets) {
+        if (s.title === 'Bộ câu hỏi 1 (Mặc định)') {
+          if (!addedCanonicalDefault && canonicalDefaultSet && s.id === canonicalDefaultSet.id) {
+            sets.push({ ...s, isShared: true, scope: 'shared' });
+            addedCanonicalDefault = true;
+          }
+          continue;
+        }
+        sets.push(s);
+      }
+
+      // Auto-initialize 1 shared "Bộ câu hỏi 1 (Mặc định)" only if the entire database has 0 sets
       if (sets.length === 0) {
         const [mcqSnap, tfSnap, saSnap] = await Promise.all([
           getDocs(collection(db, 'questions_mcq')),
@@ -294,11 +341,13 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
         if (total > 0) {
           const initialSetData: Omit<QuestionSet, 'id'> = {
             title: 'Bộ câu hỏi 1 (Mặc định)',
-            description: `Bộ câu hỏi của GV ${effectiveTeacherName}`,
+            description: 'Bộ câu hỏi chung mặc định trên hệ thống',
             subject: currentTeacher?.subject || 'Tin học',
             sourceType: 'preset',
             teacherId: effectiveTeacherId,
             teacherName: effectiveTeacherName,
+            isShared: true,
+            scope: 'shared',
             isActive: true,
             mcqs: seedMcqs,
             tfs: seedTfs,
@@ -879,9 +928,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
       }
 
       // Case B: Creating a brand new QuestionSet ("Bộ câu hỏi 1, 2, 3...")
-      const nextNum = questionSets.length + 1;
+      const nextNum = (newSetScope === 'personal' ? myQuestionSets.length : sharedQuestionSets.length) + 1;
       const finalTitle = newSetNameInput.trim() || `Bộ câu hỏi ${nextNum} - ${subjectToApply}`;
       const shouldActivate = autoActivateUploadedSet || questionSets.length === 0;
+      const isSharedFlag = newSetScope === 'shared';
 
       if (shouldActivate) {
         for (const s of questionSets) {
@@ -898,6 +948,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
         sourceType: fileType,
         teacherId: effectiveTeacherId,
         teacherName: effectiveTeacherName,
+        isShared: isSharedFlag,
+        scope: newSetScope,
         isActive: shouldActivate,
         mcqs,
         tfs,
@@ -978,11 +1030,12 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
       fetchQuestionsCount();
       fetchQuestionsList();
 
+      const scopeLabel = isSharedFlag ? 'Bộ câu hỏi chung' : 'Bộ câu hỏi của tôi';
       setExcelStatusMessage({
         type: 'success',
-        text: `Đã lưu thành "${finalTitle}" (Môn: ${subjectToApply}, Nguồn: File ${fileTypeLabel}) gồm ${total} câu (${mcqs.length} trắc nghiệm, ${tfs.length} đúng/sai, ${sas.length} trả lời ngắn) và tự động đồng bộ lên Google Sheet! ${shouldActivate ? 'Bộ đề này đã được CHỌN CHO HỌC SINH LÀM NGAY.' : ''}`
+        text: `Đã lưu thành "${finalTitle}" vào mục [${scopeLabel}] (Môn: ${subjectToApply}, Nguồn: File ${fileTypeLabel}) gồm ${total} câu (${mcqs.length} trắc nghiệm, ${tfs.length} đúng/sai, ${sas.length} trả lời ngắn) và tự động đồng bộ lên Google Sheet! ${shouldActivate ? 'Bộ đề này đã được CHỌN CHO HỌC SINH LÀM NGAY.' : ''}`
       });
-      showToast('success', `Đã tạo "${finalTitle}" (Môn ${subjectToApply}) từ file ${fileTypeLabel}!`);
+      showToast('success', `Đã tạo "${finalTitle}" vào mục [${scopeLabel}]!`);
     } catch (err: any) {
       setExcelStatusMessage({
         type: 'error',
@@ -1006,7 +1059,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
   }) => {
     setCreatingSetLoading(true);
     try {
-      const nextNum = questionSets.length + 1;
+      const isSharedFlag = newSetScope === 'shared';
+      const nextNum = (newSetScope === 'personal' ? myQuestionSets.length : sharedQuestionSets.length) + 1;
       const subjectToApply = getEffectiveSubject() || preset.subject || 'Tin học';
       const finalTitle = newSetNameInput.trim() || `Bộ câu hỏi ${nextNum} - ${preset.title}`;
       const shouldActivate = autoActivateUploadedSet || questionSets.length === 0;
@@ -1032,6 +1086,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
         sourceType: 'preset',
         teacherId: effectiveTeacherId,
         teacherName: effectiveTeacherName,
+        isShared: isSharedFlag,
+        scope: newSetScope,
         isActive: shouldActivate,
         mcqs,
         tfs,
@@ -1110,7 +1166,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
 
       fetchQuestionsCount();
       fetchQuestionsList();
-      showToast('success', `Đã thêm "${finalTitle}" (Môn: ${subjectToApply}) từ kho bộ đề có sẵn!`);
+      showToast(
+        'success',
+        `Đã thêm "${finalTitle}" vào mục [${isSharedFlag ? 'Bộ câu hỏi chung' : 'Bộ câu hỏi của tôi'}]!`
+      );
     } catch (err: any) {
       showToast('error', 'Lỗi khi tạo bộ đề có sẵn: ' + (err.message || ''));
     } finally {
@@ -1175,7 +1234,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
         }));
 
       const total = mcqs.length + tfs.length + sas.length;
-      const nextNum = questionSets.length + 1;
+      const isSharedFlag = newSetScope === 'shared';
+      const nextNum = (newSetScope === 'personal' ? myQuestionSets.length : sharedQuestionSets.length) + 1;
       const finalTitle = newSetNameInput.trim() || `Bộ câu hỏi ${nextNum} - ${effectiveSubj}`;
       const shouldActivate = autoActivateUploadedSet || questionSets.length === 0;
 
@@ -1194,6 +1254,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
         sourceType: 'bank',
         teacherId: effectiveTeacherId,
         teacherName: effectiveTeacherName,
+        isShared: isSharedFlag,
+        scope: newSetScope,
         isActive: shouldActivate,
         mcqs,
         tfs,
@@ -1261,11 +1323,97 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
       setSelectedBankQuestionIds([]);
       setShowAddSetModal(false);
 
-      showToast('success', `Đã tạo "${finalTitle}" (Môn: ${effectiveSubj}) gồm ${total} câu hỏi từ Ngân hàng đề!`);
+      showToast(
+        'success',
+        `Đã tạo "${finalTitle}" vào mục [${isSharedFlag ? 'Bộ câu hỏi chung' : 'Bộ câu hỏi của tôi'}] gồm ${total} câu hỏi!`
+      );
     } catch (err: any) {
       showToast('error', 'Lỗi khi tạo bộ câu hỏi từ ngân hàng: ' + (err.message || ''));
     } finally {
       setCreatingSetLoading(false);
+    }
+  };
+
+  // Sao chép 1 bộ câu hỏi từ "Bộ câu hỏi chung" về "Bộ câu hỏi của tôi" để tùy chỉnh riêng
+  const handleCloneSharedSetToMine = async (sourceSet: QuestionSet) => {
+    try {
+      const nowIso = new Date().toISOString();
+      const baseTitle = sourceSet.title.replace(/\s*\(Mặc định\)/i, '').trim();
+      const clonedTitle = `${baseTitle} - Của GV ${effectiveTeacherName}`;
+      const mcqs = (sourceSet.mcqs || []).map((q, idx) => ({ ...q, id: q.id || `clone_mcq_${Date.now()}_${idx}` }));
+      const tfs = (sourceSet.tfs || []).map((q, idx) => ({ ...q, id: q.id || `clone_tf_${Date.now()}_${idx}` }));
+      const sas = (sourceSet.sas || []).map((q, idx) => ({ ...q, id: q.id || `clone_sa_${Date.now()}_${idx}` }));
+      const total = mcqs.length + tfs.length + sas.length;
+
+      const clonedData: Omit<QuestionSet, 'id'> = {
+        title: clonedTitle,
+        description: `Bản sao cá nhân của GV ${effectiveTeacherName} từ "${sourceSet.title}"`,
+        subject: sourceSet.subject || 'Tin học',
+        sourceType: sourceSet.sourceType || 'preset',
+        teacherId: effectiveTeacherId,
+        teacherName: effectiveTeacherName,
+        isShared: false,
+        scope: 'personal',
+        isActive: false,
+        mcqs,
+        tfs,
+        sas,
+        totalQuestions: total,
+        createdAt: nowIso
+      };
+
+      const docRef = await addDoc(collection(db, 'question_sets'), clonedData);
+      const created: QuestionSet = { id: docRef.id, ...clonedData };
+      setQuestionSets(prev => [created, ...prev]);
+      setSelectedSetId(docRef.id);
+      showToast('success', `Đã sao chép "${sourceSet.title}" vào mục "Bộ câu hỏi của tôi" (${clonedTitle})!`);
+    } catch (err: any) {
+      showToast('error', 'Lỗi khi sao chép về Bộ của tôi: ' + (err.message || ''));
+    }
+  };
+
+  // Chuyển đổi 1 bộ câu hỏi giữa "Bộ của tôi" (personal) và "Bộ chung" (shared)
+  const handleToggleShareQuestionSet = async (targetSet: QuestionSet) => {
+    try {
+      const currentlyMine = isQuestionSetMine(targetSet);
+      const nextScope: 'personal' | 'shared' = currentlyMine ? 'shared' : 'personal';
+      const nextIsShared = nextScope === 'shared';
+      const nextTitle =
+        nextScope === 'personal' && targetSet.title === 'Bộ câu hỏi 1 (Mặc định)'
+          ? `Bộ câu hỏi 1 - GV ${effectiveTeacherName}`
+          : targetSet.title;
+
+      await updateDoc(doc(db, 'question_sets', targetSet.id), {
+        isShared: nextIsShared,
+        scope: nextScope,
+        title: nextTitle,
+        teacherId: nextScope === 'personal' ? effectiveTeacherId : targetSet.teacherId,
+        teacherName: nextScope === 'personal' ? effectiveTeacherName : targetSet.teacherName,
+        updatedAt: new Date().toISOString()
+      });
+
+      setQuestionSets(prev =>
+        prev.map(s =>
+          s.id === targetSet.id
+            ? {
+                ...s,
+                isShared: nextIsShared,
+                scope: nextScope,
+                title: nextTitle,
+                teacherId: nextScope === 'personal' ? effectiveTeacherId : s.teacherId,
+                teacherName: nextScope === 'personal' ? effectiveTeacherName : s.teacherName
+              }
+            : s
+        )
+      );
+
+      if (nextIsShared) {
+        showToast('success', `Đã chia sẻ "${nextTitle}" sang mục 🌐 Bộ câu hỏi chung!`);
+      } else {
+        showToast('success', `Đã chuyển "${nextTitle}" về mục 📌 Bộ câu hỏi của tôi!`);
+      }
+    } catch (err: any) {
+      showToast('error', 'Lỗi khi chuyển phân loại bộ câu hỏi: ' + (err.message || ''));
     }
   };
 
@@ -1810,7 +1958,31 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
           if (q.type === 'tf') setTfCount(prev => Math.max(0, prev - 1));
           if (q.type === 'sa') setSaCount(prev => Math.max(0, prev - 1));
 
-          showToast('success', 'Đã xóa câu hỏi khỏi ngân hàng đề thành công!');
+          // Also remove question from any question_sets if present
+          for (const setItem of questionSets) {
+            const origLen = (setItem.mcqs?.length || 0) + (setItem.tfs?.length || 0) + (setItem.sas?.length || 0);
+            const nextMcqs = (setItem.mcqs || []).filter(item => item.id !== q.id && item.text !== q.text);
+            const nextTfs = (setItem.tfs || []).filter(item => item.id !== q.id && item.text !== q.text);
+            const nextSas = (setItem.sas || []).filter(item => item.id !== q.id && item.text !== q.text);
+            const nextTotal = nextMcqs.length + nextTfs.length + nextSas.length;
+            if (nextTotal !== origLen) {
+              await updateDoc(doc(db, 'question_sets', setItem.id), {
+                mcqs: nextMcqs,
+                tfs: nextTfs,
+                sas: nextSas,
+                totalQuestions: nextTotal
+              }).catch(() => {});
+              setQuestionSets(prev =>
+                prev.map(s =>
+                  s.id === setItem.id
+                    ? { ...s, mcqs: nextMcqs, tfs: nextTfs, sas: nextSas, totalQuestions: nextTotal }
+                    : s
+                )
+              );
+            }
+          }
+
+          showToast('success', 'Đã xóa câu hỏi thành công!');
           fetchQuestionsCount();
           fetchQuestionsList();
         } catch (err: any) {
@@ -1819,6 +1991,118 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
         }
       }
     });
+  };
+
+  // Open full Question Set Viewer & Editor Modal
+  const openQuestionSetEditor = (targetId?: string | null) => {
+    const resolvedId =
+      targetId && targetId !== 'all'
+        ? targetId
+        : selectedSetId && selectedSetId !== 'all'
+        ? selectedSetId
+        : activeSetId || (questionSets[0]?.id ?? null);
+    if (!resolvedId) {
+      showToast('info', 'Hiện chưa có bộ câu hỏi nào để xem & sửa. Hãy thêm một bộ câu hỏi trước!');
+      return;
+    }
+    setEditorTargetSetId(resolvedId);
+    setShowSetEditorModal(true);
+  };
+
+  // Start inline editing a single question in the bottom list
+  const startInlineEditQuestion = (q: { id: string; type: 'mcq' | 'tf' | 'sa'; text: string; details?: any }) => {
+    setEditingBankQId(q.id);
+    setEditingBankQText(q.text || '');
+    if (q.type === 'mcq') {
+      const opts = Array.isArray(q.details?.options) ? [...q.details.options] : ['', '', '', ''];
+      while (opts.length < 4) opts.push('');
+      setEditingBankQOptions(opts.slice(0, 4));
+      setEditingBankQCorrectIdx(typeof q.details?.correctAnswerIndex === 'number' ? q.details.correctAnswerIndex : 0);
+    } else if (q.type === 'tf') {
+      const stmts = Array.isArray(q.details?.statements)
+        ? q.details.statements.map((s: any) => ({ text: s.text || '', isTrue: Boolean(s.isTrue) }))
+        : [
+            { text: 'Ý a', isTrue: true },
+            { text: 'Ý b', isTrue: false },
+            { text: 'Ý c', isTrue: true },
+            { text: 'Ý d', isTrue: false }
+          ];
+      while (stmts.length < 4) stmts.push({ text: '', isTrue: false });
+      setEditingBankQStatements(stmts.slice(0, 4));
+    } else if (q.type === 'sa') {
+      const ans = Array.isArray(q.details?.correctAnswers) ? q.details.correctAnswers.join(', ') : '';
+      setEditingBankQSAAnswers(ans);
+    }
+  };
+
+  // Save inline edited question to both Question Bank and Question Sets
+  const handleSaveInlineEditedQuestion = async (q: { id: string; type: 'mcq' | 'tf' | 'sa'; text: string; imageUrl?: string; details?: any }) => {
+    if (!editingBankQText.trim()) {
+      showToast('error', 'Nội dung câu hỏi không được để trống.');
+      return;
+    }
+    setSavingBankQ(true);
+    try {
+      const colName = q.type === 'mcq' ? 'questions_mcq' : q.type === 'tf' ? 'questions_tf' : 'questions_sa';
+      let updatedFields: any = { text: editingBankQText.trim() };
+      if (q.type === 'mcq') {
+        updatedFields.options = editingBankQOptions.map(o => o.trim());
+        updatedFields.correctAnswerIndex = editingBankQCorrectIdx;
+      } else if (q.type === 'tf') {
+        updatedFields.statements = editingBankQStatements.map(s => ({ text: s.text.trim(), isTrue: Boolean(s.isTrue) }));
+      } else if (q.type === 'sa') {
+        const parsedAns = editingBankQSAAnswers
+          .split(/[,;|]/)
+          .map(s => s.trim())
+          .filter(Boolean);
+        updatedFields.correctAnswers = parsedAns.length > 0 ? parsedAns : [''];
+      }
+
+      // 1. Update in questions_mcq / questions_tf / questions_sa if exists
+      await updateDoc(doc(db, colName, q.id), updatedFields).catch(() => {});
+
+      // 2. Also update in any question_sets that contain this question
+      for (const setItem of questionSets) {
+        let changed = false;
+        const patchItem = (item: any, idx: number) => {
+          const itemFallbackId = `${q.type}_${idx}`;
+          if (item.id === q.id || itemFallbackId === q.id || item.text === q.text) {
+            changed = true;
+            return { ...item, ...updatedFields, id: item.id || q.id };
+          }
+          return item;
+        };
+        const nextMcqs = q.type === 'mcq' ? (setItem.mcqs || []).map(patchItem) : setItem.mcqs;
+        const nextTfs = q.type === 'tf' ? (setItem.tfs || []).map(patchItem) : setItem.tfs;
+        const nextSas = q.type === 'sa' ? (setItem.sas || []).map(patchItem) : setItem.sas;
+        if (changed) {
+          await updateDoc(doc(db, 'question_sets', setItem.id), {
+            mcqs: nextMcqs,
+            tfs: nextTfs,
+            sas: nextSas
+          }).catch(() => {});
+          setQuestionSets(prev =>
+            prev.map(s => (s.id === setItem.id ? { ...s, mcqs: nextMcqs, tfs: nextTfs, sas: nextSas } : s))
+          );
+        }
+      }
+
+      // 3. Update local questionList
+      setQuestionList(prev =>
+        prev.map(item =>
+          item.id === q.id
+            ? { ...item, text: updatedFields.text, details: { ...(item.details || {}), ...updatedFields } }
+            : item
+        )
+      );
+
+      setEditingBankQId(null);
+      showToast('success', 'Đã lưu chỉnh sửa câu hỏi thành công!');
+    } catch (err: any) {
+      showToast('error', 'Lỗi khi lưu câu hỏi: ' + (err.message || ''));
+    } finally {
+      setSavingBankQ(false);
+    }
   };
 
   // Upload Image From Local File in Modal -> Save to Google Drive folder (1sBrEXMk0h8CL_CKj8lYGpuzdCKMWKs_3)
@@ -2060,18 +2344,44 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                       className="px-3.5 py-2.5 bg-white border-2 border-indigo-300 focus:border-emerald-600 rounded-xl text-xs sm:text-sm font-bold text-zinc-900 focus:outline-hidden cursor-pointer min-w-[260px]"
                     >
                       <option value="">-- Chọn bộ câu hỏi cho toàn bộ HS của tôi --</option>
-                      {questionSets.map(s => (
-                        <option key={s.id} value={s.id}>
-                          {s.title} {s.subject ? `(Môn: ${s.subject})` : ''} — {s.totalQuestions || 0} câu
-                        </option>
-                      ))}
+                      {myQuestionSets.length > 0 && (
+                        <optgroup label={`📌 Bộ câu hỏi của tôi (${myQuestionSets.length} bộ)`}>
+                          {myQuestionSets.map(s => (
+                            <option key={s.id} value={s.id}>
+                              📌 {s.title} {s.subject ? `(Môn: ${s.subject})` : ''} — {s.totalQuestions || 0} câu
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {sharedQuestionSets.length > 0 && (
+                        <optgroup label={`🌐 Bộ câu hỏi chung (${sharedQuestionSets.length} bộ)`}>
+                          {sharedQuestionSets.map(s => (
+                            <option key={s.id} value={s.id}>
+                              🌐 {s.title} {s.subject ? `(Môn: ${s.subject})` : ''} — {s.totalQuestions || 0} câu
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
                     </select>
+
+                    {questionSets.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => openQuestionSetEditor(activeSetId || questionSets[0]?.id)}
+                        className="px-3.5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs sm:text-sm rounded-xl inline-flex items-center justify-center gap-1.5 shadow-xs transition-all cursor-pointer shrink-0"
+                        title="Xem và sửa toàn bộ câu hỏi trong bộ đề"
+                      >
+                        <Edit3 className="w-4 h-4" />
+                        <span>Xem & Sửa Toàn Bộ Câu Hỏi</span>
+                      </button>
+                    )}
 
                     <button
                       type="button"
                       onClick={() => {
                         setImportTargetSetId(null);
-                        setNewSetNameInput(`Bộ câu hỏi ${questionSets.length + 1}`);
+                        setNewSetScope('personal');
+                        setNewSetNameInput(`Bộ câu hỏi ${myQuestionSets.length + 1}`);
                         setAddSetMode('upload');
                         setShowAddSetModal(true);
                       }}
@@ -2295,26 +2605,39 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                           </div>
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setImportTargetSetId(null);
-                            setNewSetNameInput(`Bộ câu hỏi ${questionSets.length + 1}`);
-                            setAddSetMode('upload');
-                            setShowAddSetModal(true);
-                          }}
-                          className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl inline-flex items-center gap-1.5 shadow-xs shrink-0 self-start sm:self-auto transition-all cursor-pointer"
-                        >
-                          <Plus className="w-4 h-4" />
-                          <span>+ Thêm Bộ Câu Hỏi Mới</span>
-                        </button>
+                        <div className="flex flex-wrap items-center gap-2 shrink-0 self-start sm:self-auto">
+                          {questionSets.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => openQuestionSetEditor(currentClassSet?.id || activeSetId || questionSets[0]?.id)}
+                              className="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded-xl inline-flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
+                            >
+                              <Edit3 className="w-4 h-4" />
+                              <span>Xem & Sửa Câu Hỏi</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setImportTargetSetId(null);
+                              setNewSetScope('personal');
+                              setNewSetNameInput(`Bộ câu hỏi ${myQuestionSets.length + 1}`);
+                              setAddSetMode('upload');
+                              setShowAddSetModal(true);
+                            }}
+                            className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl inline-flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
+                          >
+                            <Plus className="w-4 h-4" />
+                            <span>+ Thêm Bộ Câu Hỏi Mới</span>
+                          </button>
+                        </div>
                       </div>
 
                       {/* Dropdown Selector + Active Set Summary */}
                       <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center bg-white p-3.5 rounded-xl border border-zinc-200/80">
                         <div className="md:col-span-7">
                           <label className="block text-[11px] font-bold text-zinc-500 uppercase mb-1">
-                            Bộ câu hỏi áp dụng cho Lớp {selectedClass.name}:
+                            Bộ câu hỏi áp dụng cho Lớp {selectedClass.name} (Chọn từ Bộ của tôi hoặc Bộ chung):
                           </label>
                           <select
                             value={effectiveClassSetId}
@@ -2322,11 +2645,24 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                             className="w-full px-3.5 py-2.5 bg-zinc-50 border-2 border-indigo-200 focus:border-emerald-600 rounded-xl text-xs sm:text-sm font-bold text-zinc-900 focus:outline-hidden cursor-pointer"
                           >
                             <option value="">-- Tạm đóng / Không mở bộ câu hỏi nào cho Lớp {selectedClass.name} --</option>
-                            {questionSets.map((s) => (
-                              <option key={s.id} value={s.id}>
-                                {s.title} {s.subject ? `(Môn: ${s.subject})` : ''} — {s.totalQuestions || 0} câu
-                              </option>
-                            ))}
+                            {myQuestionSets.length > 0 && (
+                              <optgroup label={`📌 Bộ câu hỏi của tôi (${myQuestionSets.length} bộ)`}>
+                                {myQuestionSets.map((s) => (
+                                  <option key={s.id} value={s.id}>
+                                    📌 {s.title} {s.subject ? `(Môn: ${s.subject})` : ''} — {s.totalQuestions || 0} câu
+                                  </option>
+                                ))}
+                              </optgroup>
+                            )}
+                            {sharedQuestionSets.length > 0 && (
+                              <optgroup label={`🌐 Bộ câu hỏi chung (${sharedQuestionSets.length} bộ)`}>
+                                {sharedQuestionSets.map((s) => (
+                                  <option key={s.id} value={s.id}>
+                                    🌐 {s.title} {s.subject ? `(Môn: ${s.subject})` : ''} — {s.totalQuestions || 0} câu
+                                  </option>
+                                ))}
+                              </optgroup>
+                            )}
                           </select>
                         </div>
 
@@ -2340,6 +2676,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                                 </span>
                               </div>
                               <div className="text-[11px] text-emerald-800 flex flex-wrap items-center gap-1.5">
+                                <span className="px-1.5 py-0.2 rounded bg-white/80 font-extrabold text-[10px]">
+                                  {isQuestionSetMine(currentClassSet) ? '📌 Bộ của tôi' : '🌐 Bộ chung'}
+                                </span>
                                 {currentClassSet.subject && (
                                   <span className="font-bold">📚 Môn: {currentClassSet.subject} •</span>
                                 )}
@@ -2361,12 +2700,12 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                         </div>
                       </div>
 
-                      {/* Quick 1-Click Set Cards inside Class View */}
+                      {/* Quick 1-Click Set Cards inside Class View (Separated by Mine vs Shared) */}
                       {questionSets.length > 0 && (
-                        <div className="space-y-2 pt-1">
+                        <div className="space-y-3 pt-1">
                           <div className="flex items-center justify-between">
                             <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-500">
-                              Bấm chọn nhanh bộ câu hỏi cho Lớp {selectedClass.name} ({questionSets.length} bộ đề hiện có):
+                              Bấm chọn nhanh bộ câu hỏi cho Lớp {selectedClass.name} (📌 {myQuestionSets.length} Bộ của tôi • 🌐 {sharedQuestionSets.length} Bộ chung):
                             </span>
                             {currentClassSet && (
                               <button
@@ -2381,6 +2720,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
                             {questionSets.map((s) => {
                               const isChosenForThisClass = effectiveClassSetId === s.id;
+                              const isMine = isQuestionSetMine(s);
                               return (
                                 <button
                                   key={s.id}
@@ -2393,13 +2733,22 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                                   }`}
                                 >
                                   <div className="w-full">
-                                    <div className="flex items-start justify-between gap-1.5">
-                                      <span className="font-extrabold text-xs sm:text-sm truncate">
-                                        {s.title}
+                                    <div className="flex items-center justify-between gap-1 mb-1">
+                                      <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold ${
+                                        isChosenForThisClass
+                                          ? 'bg-white/20 text-white'
+                                          : isMine
+                                          ? 'bg-indigo-100 text-indigo-800'
+                                          : 'bg-teal-100 text-teal-800'
+                                      }`}>
+                                        {isMine ? '📌 Bộ của tôi' : '🌐 Bộ chung'}
                                       </span>
                                       {isChosenForThisClass && (
                                         <CheckCircle2 className="w-4 h-4 text-white shrink-0" />
                                       )}
+                                    </div>
+                                    <div className="font-extrabold text-xs sm:text-sm truncate">
+                                      {s.title}
                                     </div>
                                     <div className={`text-[11px] mt-0.5 flex flex-wrap items-center gap-1 ${
                                       isChosenForThisClass ? 'text-emerald-100' : 'text-zinc-500'
@@ -2586,7 +2935,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
             </div>
           </div>
 
-          {/* ================= QUESTION SETS MANAGEMENT (Bộ câu hỏi 1, 2, 3...) ================= */}
+          {/* ================= QUESTION SETS MANAGEMENT: PHÂN LOẠI 1. BỘ CÂU HỎI CỦA TÔI & 2. BỘ CÂU HỎI CHUNG ================= */}
           <div className="bg-white p-6 sm:p-8 rounded-3xl border border-zinc-200 shadow-xs space-y-6">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
               <div>
@@ -2601,18 +2950,30 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                     type="button"
                     onClick={() => {
                       setImportTargetSetId(null);
-                      setNewSetNameInput(`Bộ câu hỏi ${questionSets.length + 1}`);
+                      setNewSetScope('personal');
+                      setNewSetNameInput(`Bộ câu hỏi ${myQuestionSets.length + 1}`);
                       setAddSetMode('upload');
                       setShowAddSetModal(true);
                     }}
                     className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs sm:text-sm font-bold rounded-xl inline-flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
                   >
                     <Plus className="w-4 h-4" />
-                    <span>+ Thêm Bộ Câu Hỏi Mới (Chọn Có Sẵn / Ngân Hàng / Tải Excel, Word, PDF)</span>
+                    <span>+ Thêm Vào Bộ Của Tôi (Excel / Word / PDF / Ngân Hàng)</span>
                   </button>
+
+                  {questionSets.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => openQuestionSetEditor(selectedSetId && selectedSetId !== 'all' ? selectedSetId : activeSetId || questionSets[0]?.id)}
+                      className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white text-xs sm:text-sm font-bold rounded-xl inline-flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
+                    >
+                      <Edit3 className="w-4 h-4" />
+                      <span>📝 Xem & Sửa Toàn Bộ Câu Hỏi</span>
+                    </button>
+                  )}
                 </div>
-                <p className="text-xs sm:text-sm text-zinc-500 max-w-2xl leading-relaxed">
-                  Giáo viên có nhiều hình thức tạo đề: <strong>Chọn bộ câu hỏi có sẵn</strong>, <strong>Chọn từ ngân hàng tạo bộ mới</strong>, hoặc <strong>Tự tải bộ câu hỏi (Excel, Word, PDF) kèm chọn môn áp dụng</strong>. Thầy/Cô muốn học sinh làm bộ nào thì bấm <strong>"Chọn Bộ Này Cho HS Làm"</strong>!
+                <p className="text-xs sm:text-sm text-zinc-500 max-w-3xl leading-relaxed">
+                  Hệ thống phân tách rõ ràng thành <strong>2 loại bộ câu hỏi</strong>: <strong>📌 Bộ câu hỏi của tôi</strong> (bộ đề riêng của GV {effectiveTeacherName}) và <strong>🌐 Bộ câu hỏi chung</strong> (bộ đề mặc định & chia sẻ chung toàn hệ thống). Thầy/Cô có thể chọn bất kỳ bộ nào cho học sinh làm hoặc sao chép từ Bộ chung về Bộ của tôi để chỉnh sửa riêng!
                 </p>
               </div>
 
@@ -2621,7 +2982,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                 <div className="inline-flex items-center gap-2.5 px-4 py-3 bg-emerald-50 border-2 border-emerald-500 rounded-2xl text-emerald-900 text-xs font-bold shadow-xs">
                   <span className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse" />
                   <div>
-                    <span className="text-[10px] uppercase tracking-wider text-emerald-700 block">Đang mở cho học sinh làm:</span>
+                    <span className="text-[10px] uppercase tracking-wider text-emerald-700 block">
+                      Đang mở cho HS của GV {effectiveTeacherName}:
+                    </span>
                     <span className="text-sm font-black text-emerald-950">
                       {questionSets.find(s => s.id === activeSetId)?.title}
                     </span>
@@ -2640,242 +3003,463 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
               )}
             </div>
 
-            {/* List/Cards of Question Sets */}
-            {loadingSets ? (
-              <div className="py-12 text-center text-zinc-400 text-sm">Đang tải danh sách bộ câu hỏi...</div>
-            ) : questionSets.length === 0 ? (
-              <div className="py-10 px-4 text-center bg-zinc-50 rounded-2xl border border-dashed border-zinc-200 space-y-3">
-                <BookOpen className="w-10 h-10 text-zinc-300 mx-auto" />
-                <div>
-                  <h4 className="font-bold text-zinc-700 text-sm mb-1">Chưa có bộ câu hỏi nào</h4>
-                  <p className="text-xs text-zinc-400 max-w-md mx-auto">
-                    Hãy bấm nút bên dưới để chọn bộ câu hỏi có sẵn, lấy từ ngân hàng đề, hoặc tải file Excel / Word / PDF lên!
-                  </p>
-                </div>
+            {/* Category Filter Tabs: Tất cả (Hiển thị cả 2 mục) | 📌 Bộ câu hỏi của tôi | 🌐 Bộ câu hỏi chung */}
+            <div className="flex flex-wrap items-center justify-between gap-3 p-2 bg-zinc-100 rounded-2xl border border-zinc-200/80">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setQuestionSetCategoryFilter('all')}
+                  className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-extrabold transition-all flex items-center gap-2 cursor-pointer ${
+                    questionSetCategoryFilter === 'all'
+                      ? 'bg-white text-zinc-900 shadow-xs ring-1 ring-zinc-200'
+                      : 'text-zinc-600 hover:text-zinc-900'
+                  }`}
+                >
+                  <span>Hiển thị cả 2 loại</span>
+                  <span className="px-2 py-0.5 rounded-full bg-zinc-200 text-zinc-800 text-[11px]">
+                    {questionSets.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setQuestionSetCategoryFilter('mine')}
+                  className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-extrabold transition-all flex items-center gap-2 cursor-pointer ${
+                    questionSetCategoryFilter === 'mine'
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'text-indigo-800 hover:bg-indigo-50'
+                  }`}
+                >
+                  <span>📌 1. Bộ Câu Hỏi Của Tôi</span>
+                  <span className={`px-2 py-0.5 rounded-full text-[11px] ${
+                    questionSetCategoryFilter === 'mine'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-indigo-100 text-indigo-800'
+                  }`}>
+                    {myQuestionSets.length} bộ
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setQuestionSetCategoryFilter('shared')}
+                  className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-extrabold transition-all flex items-center gap-2 cursor-pointer ${
+                    questionSetCategoryFilter === 'shared'
+                      ? 'bg-teal-600 text-white shadow-xs'
+                      : 'text-teal-800 hover:bg-teal-50'
+                  }`}
+                >
+                  <span>🌐 2. Bộ Câu Hỏi Chung</span>
+                  <span className={`px-2 py-0.5 rounded-full text-[11px] ${
+                    questionSetCategoryFilter === 'shared'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-teal-100 text-teal-800'
+                  }`}>
+                    {sharedQuestionSets.length} bộ
+                  </span>
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pr-1">
                 <button
                   type="button"
                   onClick={() => {
                     setImportTargetSetId(null);
-                    setNewSetNameInput('Bộ câu hỏi 1');
+                    setNewSetScope('personal');
+                    setNewSetNameInput(`Bộ câu hỏi ${myQuestionSets.length + 1}`);
                     setAddSetMode('upload');
                     setShowAddSetModal(true);
                   }}
-                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs sm:text-sm rounded-xl inline-flex items-center gap-2 shadow-sm transition-all"
+                  className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold inline-flex items-center gap-1 cursor-pointer transition-all"
                 >
-                  <Plus className="w-4 h-4" />
-                  <span>+ Thêm Bộ Câu Hỏi Đầu Tiên</span>
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>+ Tạo Bộ Của Tôi</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setImportTargetSetId(null);
+                    setNewSetScope('shared');
+                    setNewSetNameInput(`Bộ câu hỏi chung ${sharedQuestionSets.length + 1}`);
+                    setAddSetMode('upload');
+                    setShowAddSetModal(true);
+                  }}
+                  className="px-3 py-1.5 bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 rounded-xl text-xs font-bold inline-flex items-center gap-1 cursor-pointer transition-all"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>+ Tạo Bộ Câu Hỏi Chung</span>
                 </button>
               </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                {questionSets.map((s) => {
-                  const isActive = s.id === activeSetId;
-                  const isSelected = s.id === selectedSetId;
-                  const isEditingThisTitle = editingSetTitleId === s.id;
+            </div>
 
-                  return (
-                    <div
-                      key={s.id}
-                      className={`rounded-2xl p-5 border transition-all flex flex-col justify-between ${
-                        isActive
-                          ? 'border-2 border-emerald-500 bg-linear-to-b from-emerald-50/60 to-white shadow-md ring-2 ring-emerald-500/20'
-                          : isSelected
-                          ? 'border-indigo-400 bg-indigo-50/30 shadow-xs'
-                          : 'border-zinc-200 bg-white hover:border-zinc-300 shadow-2xs'
-                      }`}
-                    >
-                      <div className="space-y-3">
-                        {/* Card Header */}
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            {isEditingThisTitle ? (
-                              <div className="flex items-center gap-1.5">
-                                <input
-                                  type="text"
-                                  value={editingSetTitleText}
-                                  onChange={(e) => setEditingSetTitleText(e.target.value)}
-                                  className="w-full px-2.5 py-1 text-sm font-bold bg-white border border-indigo-500 rounded-lg focus:outline-hidden"
-                                  autoFocus
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => handleSaveSetTitle(s.id, editingSetTitleText)}
-                                  className="px-2 py-1 bg-emerald-600 text-white rounded-lg text-xs font-bold shrink-0"
-                                >
-                                  Lưu
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setEditingSetTitleId(null)}
-                                  className="px-2 py-1 bg-zinc-200 text-zinc-700 rounded-lg text-xs font-bold shrink-0"
-                                >
-                                  Hủy
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="flex items-center gap-1.5 group">
-                                <h3 className="font-extrabold text-base text-zinc-900 truncate">
-                                  {s.title}
-                                </h3>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setEditingSetTitleId(s.id);
-                                    setEditingSetTitleText(s.title);
-                                  }}
-                                  className="p-1 text-zinc-400 hover:text-indigo-600 rounded-md transition-colors"
-                                  title="Đổi tên bộ câu hỏi"
-                                >
-                                  <Edit3 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            )}
+            {/* Render helper for a single Question Set card */}
+            {(() => {
+              const renderQuestionSetCard = (s: QuestionSet, isMineSection: boolean) => {
+                const isActive = s.id === activeSetId;
+                const isSelected = s.id === selectedSetId;
+                const isEditingThisTitle = editingSetTitleId === s.id;
 
-                            <div className="flex flex-wrap items-center gap-1.5 mt-1">
-                              {s.subject && (
-                                <span className="px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-800 text-[11px] font-bold">
-                                  📚 Môn: {s.subject}
-                                </span>
-                              )}
-                              {s.sourceType && (
-                                <span className="px-2 py-0.5 rounded-md bg-zinc-100 text-zinc-600 text-[10px] font-semibold uppercase">
-                                  {s.sourceType === 'excel' ? 'Excel' :
-                                   s.sourceType === 'word' ? 'Word' :
-                                   s.sourceType === 'pdf' ? 'PDF' :
-                                   s.sourceType === 'bank' ? 'Ngân hàng đề' :
-                                   s.sourceType === 'preset' ? 'Bộ có sẵn' : 'Tự tạo'}
-                                </span>
-                              )}
-                              <span className="text-[11px] text-zinc-400">
-                                • {s.createdAt ? new Date(s.createdAt).toLocaleDateString('vi-VN') : 'Mới tạo'}
-                              </span>
+                return (
+                  <div
+                    key={s.id}
+                    className={`rounded-2xl p-5 border transition-all flex flex-col justify-between ${
+                      isActive
+                        ? 'border-2 border-emerald-500 bg-linear-to-b from-emerald-50/60 to-white shadow-md ring-2 ring-emerald-500/20'
+                        : isSelected
+                        ? 'border-indigo-400 bg-indigo-50/30 shadow-xs'
+                        : isMineSection
+                        ? 'border-indigo-200/80 bg-white hover:border-indigo-400 shadow-2xs'
+                        : 'border-teal-200/80 bg-white hover:border-teal-400 shadow-2xs'
+                    }`}
+                  >
+                    <div className="space-y-3">
+                      {/* Category Badge + Status Pill */}
+                      <div className="flex items-center justify-between gap-2">
+                        <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-extrabold ${
+                          isMineSection
+                            ? 'bg-indigo-100 text-indigo-800 border border-indigo-200'
+                            : 'bg-teal-100 text-teal-800 border border-teal-200'
+                        }`}>
+                          {isMineSection ? `📌 Bộ của tôi (${effectiveTeacherName})` : '🌐 Bộ câu hỏi chung'}
+                        </span>
+
+                        {isActive ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-600 text-white text-[11px] font-bold shadow-2xs shrink-0">
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>ĐANG MỞ CHO HS</span>
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-500 text-[11px] font-semibold shrink-0">
+                            Đang ẩn
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Card Header */}
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          {isEditingThisTitle ? (
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                value={editingSetTitleText}
+                                onChange={(e) => setEditingSetTitleText(e.target.value)}
+                                className="w-full px-2.5 py-1 text-sm font-bold bg-white border border-indigo-500 rounded-lg focus:outline-hidden"
+                                autoFocus
+                              />
+                              <button
+                                type="button"
+                                onClick={() => handleSaveSetTitle(s.id, editingSetTitleText)}
+                                className="px-2 py-1 bg-emerald-600 text-white rounded-lg text-xs font-bold shrink-0"
+                              >
+                                Lưu
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingSetTitleId(null)}
+                                className="px-2 py-1 bg-zinc-200 text-zinc-700 rounded-lg text-xs font-bold shrink-0"
+                              >
+                                Hủy
+                              </button>
                             </div>
-                          </div>
-
-                          {/* Status Pill */}
-                          {isActive ? (
-                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-600 text-white text-[11px] font-bold shadow-2xs shrink-0">
-                              <CheckCircle2 className="w-3 h-3" />
-                              <span>ĐANG MỞ CHO HS</span>
-                            </span>
                           ) : (
-                            <span className="px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-500 text-[11px] font-semibold shrink-0">
-                              Đang ẩn
-                            </span>
+                            <div className="flex items-center gap-1.5 group">
+                              <h3 className="font-extrabold text-base text-zinc-900 truncate">
+                                {s.title}
+                              </h3>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingSetTitleId(s.id);
+                                  setEditingSetTitleText(s.title);
+                                }}
+                                className="p-1 text-zinc-400 hover:text-indigo-600 rounded-md transition-colors"
+                                title="Đổi tên bộ câu hỏi"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           )}
-                        </div>
 
-                        {/* Breakdown Metrics */}
-                        <div className="bg-zinc-50/80 rounded-xl p-3 border border-zinc-100 text-xs space-y-1">
-                          <div className="flex items-center justify-between font-bold text-zinc-800">
-                            <span>Tổng số câu hỏi:</span>
-                            <span className="text-sm font-black text-indigo-700">{s.totalQuestions || 0} câu</span>
-                          </div>
-                          <div className="flex items-center justify-between text-zinc-500 text-[11px]">
-                            <span>Cấu trúc đề thi:</span>
-                            <span>{s.mcqs?.length || 0} Trắc nghiệm • {s.tfs?.length || 0} Đ/S • {s.sas?.length || 0} TLN</span>
+                          <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                            {s.subject && (
+                              <span className="px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-800 text-[11px] font-bold">
+                                📚 Môn: {s.subject}
+                              </span>
+                            )}
+                            {s.sourceType && (
+                              <span className="px-2 py-0.5 rounded-md bg-zinc-100 text-zinc-600 text-[10px] font-semibold uppercase">
+                                {s.sourceType === 'excel' ? 'Excel' :
+                                 s.sourceType === 'word' ? 'Word' :
+                                 s.sourceType === 'pdf' ? 'PDF' :
+                                 s.sourceType === 'bank' ? 'Ngân hàng đề' :
+                                 s.sourceType === 'preset' ? 'Bộ có sẵn' : 'Tự tạo'}
+                              </span>
+                            )}
+                            <span className="text-[11px] text-zinc-400">
+                              • {s.createdAt ? new Date(s.createdAt).toLocaleDateString('vi-VN') : 'Mới tạo'}
+                            </span>
                           </div>
                         </div>
                       </div>
 
-                      {/* Card Actions */}
-                      <div className="pt-4 space-y-2 border-t border-zinc-100 mt-4">
-                        {isActive ? (
-                          <div className="w-full py-2.5 px-3 bg-emerald-600 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-xs">
-                            <CheckCircle2 className="w-4 h-4 fill-white text-emerald-600" />
-                            <span>✓ Học sinh đang làm bộ câu hỏi này</span>
-                          </div>
-                        ) : (
+                      {/* Breakdown Metrics */}
+                      <div className="bg-zinc-50/80 rounded-xl p-3 border border-zinc-100 text-xs space-y-1">
+                        <div className="flex items-center justify-between font-bold text-zinc-800">
+                          <span>Tổng số câu hỏi:</span>
+                          <span className="text-sm font-black text-indigo-700">{s.totalQuestions || 0} câu</span>
+                        </div>
+                        <div className="flex items-center justify-between text-zinc-500 text-[11px]">
+                          <span>Cấu trúc đề thi:</span>
+                          <span>{s.mcqs?.length || 0} Trắc nghiệm • {s.tfs?.length || 0} Đ/S • {s.sas?.length || 0} TLN</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Card Actions */}
+                    <div className="pt-4 space-y-2 border-t border-zinc-100 mt-4">
+                      {isActive ? (
+                        <div className="w-full py-2.5 px-3 bg-emerald-600 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-xs">
+                          <CheckCircle2 className="w-4 h-4 fill-white text-emerald-600" />
+                          <span>✓ Học sinh đang làm bộ câu hỏi này</span>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleSelectActiveSet(s)}
+                          className="w-full py-2.5 px-3 bg-emerald-50 hover:bg-emerald-600 text-emerald-800 hover:text-white border border-emerald-300 hover:border-emerald-600 font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition-all shadow-xs group cursor-pointer"
+                        >
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 group-hover:text-white" />
+                          <span>Chọn Bộ Này Cho HS Làm</span>
+                        </button>
+                      )}
+
+                      {/* Nút Xem & Sửa Toàn Bộ Câu Hỏi Trong Bộ Đề Này */}
+                      <button
+                        type="button"
+                        onClick={() => openQuestionSetEditor(s.id)}
+                        className="w-full py-2 px-3 rounded-xl font-bold bg-amber-500 hover:bg-amber-600 text-white text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all cursor-pointer"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        <span>👁️ Xem & Sửa Toàn Bộ Câu Hỏi ({s.totalQuestions || 0} câu)</span>
+                      </button>
+
+                      {/* Action to Clone from Shared to Mine OR Toggle Share */}
+                      {!isMineSection ? (
+                        <div className="grid grid-cols-2 gap-1.5">
                           <button
                             type="button"
-                            onClick={() => handleSelectActiveSet(s)}
-                            className="w-full py-2.5 px-3 bg-emerald-50 hover:bg-emerald-600 text-emerald-800 hover:text-white border border-emerald-300 hover:border-emerald-600 font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition-all shadow-xs group"
+                            onClick={() => handleCloneSharedSetToMine(s)}
+                            className="py-1.5 px-2.5 rounded-lg font-bold bg-indigo-50 hover:bg-indigo-600 text-indigo-700 hover:text-white border border-indigo-200 text-xs flex items-center justify-center gap-1 transition-all cursor-pointer"
+                            title="Sao chép thành 1 bản riêng trong mục Bộ câu hỏi của tôi"
                           >
-                            <CheckCircle2 className="w-4 h-4 text-emerald-600 group-hover:text-white" />
-                            <span>Chọn Bộ Này Cho HS Làm</span>
+                            <Copy className="w-3.5 h-3.5 shrink-0" />
+                            <span className="truncate">Sao chép về Bộ của tôi</span>
                           </button>
-                        )}
+                          <button
+                            type="button"
+                            onClick={() => handleToggleShareQuestionSet(s)}
+                            className="py-1.5 px-2.5 rounded-lg font-bold bg-zinc-50 hover:bg-zinc-200 text-zinc-700 border border-zinc-200 text-xs flex items-center justify-center gap-1 transition-all cursor-pointer"
+                            title="Chuyển bộ câu hỏi này sang Bộ câu hỏi của tôi"
+                          >
+                            <span className="truncate">📌 Chuyển sang Bộ của tôi</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleToggleShareQuestionSet(s)}
+                          className="w-full py-1.5 px-2.5 rounded-lg font-bold bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-200 text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                          title="Chia sẻ bộ câu hỏi này sang mục Bộ câu hỏi chung"
+                        >
+                          <span>🌐 Chia sẻ sang Bộ câu hỏi chung</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setImportTargetSetId(s.id);
+                          if (s.subject) setSelectedSubject(s.subject);
+                          setAddSetMode('upload');
+                          setShowAddSetModal(true);
+                        }}
+                        className="w-full py-1.5 px-2.5 rounded-lg font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>+ Nhập thêm câu hỏi (Excel / Word / PDF) vào bộ này</span>
+                      </button>
+
+                      <div className="grid grid-cols-3 gap-1.5 pt-1 text-xs">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedSetId(s.id);
+                            openQuestionSetEditor(s.id);
+                          }}
+                          className={`py-1.5 px-2 rounded-lg font-bold border transition-all text-center truncate cursor-pointer ${
+                            isSelected
+                              ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                              : 'bg-white hover:bg-zinc-50 text-zinc-700 border-zinc-200'
+                          }`}
+                          title="Mở cửa sổ xem và sửa toàn bộ câu hỏi của bộ này"
+                        >
+                          Xem & Sửa Đề
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleSyncSetToSheet(s)}
+                          disabled={syncingQuestionsSheet}
+                          className="py-1.5 px-2 rounded-lg font-bold bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 transition-all text-center truncate cursor-pointer"
+                          title="Lưu riêng bộ câu hỏi này lên Google Sheet"
+                        >
+                          Lưu Sheet
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => requestDeleteQuestionSet(s)}
+                          className="py-1.5 px-2 rounded-lg font-bold bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition-all text-center truncate cursor-pointer"
+                          title="Xóa bộ câu hỏi này"
+                        >
+                          Xóa bộ này
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              };
+
+              if (loadingSets) {
+                return <div className="py-12 text-center text-zinc-400 text-sm">Đang tải danh sách bộ câu hỏi...</div>;
+              }
+
+              return (
+                <div className="space-y-8">
+                  {/* ================= LOẠI 1: 📌 BỘ CÂU HỎI CỦA TÔI ================= */}
+                  {(questionSetCategoryFilter === 'all' || questionSetCategoryFilter === 'mine') && (
+                    <div className="p-5 sm:p-6 rounded-3xl bg-indigo-50/40 border-2 border-indigo-200/90 space-y-4">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-indigo-200/70">
+                        <div className="flex items-start gap-3">
+                          <div className="w-10 h-10 rounded-2xl bg-indigo-600 text-white flex items-center justify-center font-extrabold text-base shrink-0 shadow-xs">
+                            1
+                          </div>
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h3 className="text-lg sm:text-xl font-extrabold text-indigo-950">
+                                📌 Bộ Câu Hỏi Của Tôi ({myQuestionSets.length} bộ đề)
+                              </h3>
+                              <span className="px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-800 text-xs font-bold">
+                                GV: {effectiveTeacherName}
+                              </span>
+                            </div>
+                            <p className="text-xs text-zinc-600 mt-0.5">
+                              Các bộ đề do Thầy/Cô tự tải lên (Excel, Word, PDF), trích từ ngân hàng đề hoặc sao chép từ Bộ chung về để sử dụng riêng.
+                            </p>
+                          </div>
+                        </div>
 
                         <button
                           type="button"
                           onClick={() => {
-                            setImportTargetSetId(s.id);
-                            if (s.subject) setSelectedSubject(s.subject);
+                            setImportTargetSetId(null);
+                            setNewSetScope('personal');
+                            setNewSetNameInput(`Bộ câu hỏi ${myQuestionSets.length + 1}`);
                             setAddSetMode('upload');
                             setShowAddSetModal(true);
                           }}
-                          className="w-full py-1.5 px-2.5 rounded-lg font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs flex items-center justify-center gap-1.5 transition-all"
+                          className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs sm:text-sm rounded-xl inline-flex items-center gap-1.5 shadow-sm transition-all cursor-pointer self-start sm:self-auto shrink-0"
                         >
-                          <Upload className="w-3.5 h-3.5" />
-                          <span>+ Nhập thêm câu hỏi (Excel / Word / PDF) vào bộ này</span>
+                          <Plus className="w-4 h-4" />
+                          <span>+ Thêm Vào Bộ Câu Hỏi Của Tôi</span>
                         </button>
+                      </div>
 
-                        <div className="grid grid-cols-3 gap-1.5 pt-1 text-xs">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedSetId(s.id);
-                              showToast('info', `Đang xem các câu hỏi của "${s.title}" ở danh sách bên dưới.`);
-                            }}
-                            className={`py-1.5 px-2 rounded-lg font-bold border transition-all text-center truncate ${
-                              isSelected
-                                ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
-                                : 'bg-white hover:bg-zinc-50 text-zinc-700 border-zinc-200'
-                            }`}
-                            title="Xem chi tiết các câu hỏi trong bộ này"
-                          >
-                            {isSelected ? '✓ Đang xem' : 'Xem & Chèn ảnh'}
-                          </button>
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                        {myQuestionSets.map(s => renderQuestionSetCard(s, true))}
 
-                          <button
-                            type="button"
-                            onClick={() => handleSyncSetToSheet(s)}
-                            disabled={syncingQuestionsSheet}
-                            className="py-1.5 px-2 rounded-lg font-bold bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 transition-all text-center truncate"
-                            title="Lưu riêng bộ câu hỏi này lên Google Sheet"
-                          >
-                            Lưu Sheet
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => requestDeleteQuestionSet(s)}
-                            className="py-1.5 px-2 rounded-lg font-bold bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition-all text-center truncate"
-                            title="Xóa bộ câu hỏi này"
-                          >
-                            Xóa bộ này
-                          </button>
-                        </div>
+                        {/* Dashed Add Card for My Question Sets */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setImportTargetSetId(null);
+                            setNewSetScope('personal');
+                            setNewSetNameInput(`Bộ câu hỏi ${myQuestionSets.length + 1}`);
+                            setAddSetMode('upload');
+                            setShowAddSetModal(true);
+                          }}
+                          className="rounded-2xl p-6 border-2 border-dashed border-indigo-300 hover:border-indigo-500 bg-white/80 hover:bg-indigo-50/70 transition-all flex flex-col items-center justify-center text-center gap-3 min-h-[210px] group cursor-pointer"
+                        >
+                          <div className="w-12 h-12 rounded-2xl bg-indigo-100 group-hover:bg-indigo-600 text-indigo-600 group-hover:text-white flex items-center justify-center transition-all shadow-xs">
+                            <Plus className="w-6 h-6" />
+                          </div>
+                          <div>
+                            <span className="font-extrabold text-sm sm:text-base text-indigo-950 block">
+                              + Thêm Bộ Câu Hỏi Của Tôi ({myQuestionSets.length + 1})
+                            </span>
+                            <span className="text-xs text-zinc-500 mt-1 block max-w-[240px]">
+                              Tải file Excel, Word, PDF hoặc chọn từ kho đề có sẵn / ngân hàng câu hỏi
+                            </span>
+                          </div>
+                        </button>
                       </div>
                     </div>
-                  );
-                })}
+                  )}
 
-                {/* Dashed Add New Question Set Card */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setImportTargetSetId(null);
-                    setNewSetNameInput(`Bộ câu hỏi ${questionSets.length + 1}`);
-                    setAddSetMode('upload');
-                    setShowAddSetModal(true);
-                  }}
-                  className="rounded-2xl p-6 border-2 border-dashed border-indigo-300 hover:border-indigo-500 bg-indigo-50/20 hover:bg-indigo-50/50 transition-all flex flex-col items-center justify-center text-center gap-3 min-h-[220px] group cursor-pointer"
-                >
-                  <div className="w-12 h-12 rounded-2xl bg-indigo-100 group-hover:bg-indigo-600 text-indigo-600 group-hover:text-white flex items-center justify-center transition-all shadow-xs">
-                    <Plus className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <span className="font-extrabold text-base text-indigo-950 block">
-                      + Thêm Bộ Câu Hỏi {questionSets.length + 1}
-                    </span>
-                    <span className="text-xs text-zinc-500 mt-1 block max-w-[240px]">
-                      Chọn bộ có sẵn • Chọn từ ngân hàng đề • Hoặc tải file Excel, Word, PDF (Có chọn môn áp dụng)
-                    </span>
-                  </div>
-                </button>
-              </div>
-            )}
+                  {/* ================= LOẠI 2: 🌐 BỘ CÂU HỎI CHUNG ================= */}
+                  {(questionSetCategoryFilter === 'all' || questionSetCategoryFilter === 'shared') && (
+                    <div className="p-5 sm:p-6 rounded-3xl bg-teal-50/40 border-2 border-teal-200/90 space-y-4">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-teal-200/70">
+                        <div className="flex items-start gap-3">
+                          <div className="w-10 h-10 rounded-2xl bg-teal-600 text-white flex items-center justify-center font-extrabold text-base shrink-0 shadow-xs">
+                            2
+                          </div>
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h3 className="text-lg sm:text-xl font-extrabold text-teal-950">
+                                🌐 Bộ Câu Hỏi Chung ({sharedQuestionSets.length} bộ đề)
+                              </h3>
+                              <span className="px-2.5 py-0.5 rounded-full bg-teal-100 text-teal-800 text-xs font-bold">
+                                Dùng chung toàn hệ thống
+                              </span>
+                            </div>
+                            <p className="text-xs text-zinc-600 mt-0.5">
+                              Kho đề mặc định và các bộ câu hỏi dùng chung cho tất cả giáo viên. Thầy/Cô có thể chọn trực tiếp cho HS làm hoặc bấm <strong>"Sao chép về Bộ của tôi"</strong>!
+                            </p>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setImportTargetSetId(null);
+                            setNewSetScope('shared');
+                            setNewSetNameInput(`Bộ câu hỏi chung ${sharedQuestionSets.length + 1}`);
+                            setAddSetMode('preset');
+                            setShowAddSetModal(true);
+                          }}
+                          className="px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs sm:text-sm rounded-xl inline-flex items-center gap-1.5 shadow-sm transition-all cursor-pointer self-start sm:self-auto shrink-0"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>+ Thêm Vào Bộ Câu Hỏi Chung</span>
+                        </button>
+                      </div>
+
+                      {sharedQuestionSets.length === 0 ? (
+                        <div className="py-8 text-center text-zinc-500 text-xs bg-white/80 rounded-2xl border border-dashed border-teal-300">
+                          Chưa có bộ câu hỏi chung nào. Hãy bấm "+ Thêm Vào Bộ Câu Hỏi Chung" hoặc chia sẻ từ Bộ của tôi!
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                          {sharedQuestionSets.map(s => renderQuestionSetCard(s, false))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           {/* Quick Upload & Multi-Format Import Box */}
@@ -2893,10 +3477,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
 
               {/* Subject Selection + Set Title & Auto-Activate Options */}
               <div className="bg-zinc-50 p-5 rounded-2xl border border-zinc-200/80 text-left space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div>
                     <label className="block text-xs font-bold text-indigo-900 uppercase mb-1.5">
-                      1. Chọn Môn Áp Dụng (Bắt buộc khi tải lên) *
+                      1. Chọn Môn Áp Dụng (Bắt buộc) *
                     </label>
                     <select
                       value={selectedSubject}
@@ -2923,13 +3507,27 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
 
                   <div>
                     <label className="block text-xs font-bold text-zinc-700 uppercase mb-1.5">
-                      2. Tên bộ câu hỏi mới (Tùy chọn)
+                      2. Loại Bộ Câu Hỏi Lưu Vào
+                    </label>
+                    <select
+                      value={newSetScope}
+                      onChange={(e) => setNewSetScope(e.target.value as 'personal' | 'shared')}
+                      className="w-full px-3.5 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm font-bold text-zinc-900 focus:outline-hidden focus:border-indigo-600 cursor-pointer"
+                    >
+                      <option value="personal">📌 Bộ câu hỏi của tôi (Riêng tư)</option>
+                      <option value="shared">🌐 Bộ câu hỏi chung (Chia sẻ chung)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-zinc-700 uppercase mb-1.5">
+                      3. Tên bộ câu hỏi mới (Tùy chọn)
                     </label>
                     <input
                       type="text"
                       value={newSetNameInput}
                       onChange={(e) => setNewSetNameInput(e.target.value)}
-                      placeholder={`Bộ câu hỏi ${questionSets.length + 1}${selectedSubject ? ` - ${selectedSubject}` : ''}`}
+                      placeholder={`Bộ câu hỏi ${(newSetScope === 'personal' ? myQuestionSets.length : sharedQuestionSets.length) + 1}${selectedSubject ? ` - ${selectedSubject}` : ''}`}
                       className="w-full px-3.5 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm font-semibold focus:outline-hidden focus:border-indigo-600"
                     />
                   </div>
@@ -3166,10 +3764,21 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                   <option value="all">Xem tất cả ngân hàng đề</option>
                   {questionSets.map(s => (
                     <option key={s.id} value={s.id}>
-                      {s.title} ({s.totalQuestions} câu){s.isActive ? ' - [ĐANG MỞ CHO HS]' : ''}
+                      {s.title} ({s.totalQuestions} câu){s.id === activeSetId ? ' - [ĐANG MỞ CHO HS]' : ''}
                     </option>
                   ))}
                 </select>
+
+                {questionSets.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => openQuestionSetEditor(selectedSetId && selectedSetId !== 'all' ? selectedSetId : activeSetId || questionSets[0]?.id)}
+                    className="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                    <span>Xem & Sửa Toàn Bộ Câu Hỏi</span>
+                  </button>
+                )}
 
                 <button
                   onClick={() => {
@@ -3326,7 +3935,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                           ) : null}
 
                           {/* Options preview for MCQ */}
-                          {q.type === 'mcq' && q.details?.options && (
+                          {editingBankQId !== q.id && q.type === 'mcq' && q.details?.options && (
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-1 text-xs text-zinc-600">
                               {q.details.options.map((opt: string, optIdx: number) => (
                                 <div 
@@ -3342,10 +3951,190 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                               ))}
                             </div>
                           )}
+
+                          {/* Statements preview for TF */}
+                          {editingBankQId !== q.id && q.type === 'tf' && q.details?.statements && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-1 text-xs text-zinc-600">
+                              {q.details.statements.map((st: { text: string; isTrue: boolean }, sIdx: number) => (
+                                <div
+                                  key={sIdx}
+                                  className="p-1.5 rounded-lg bg-zinc-50 border border-zinc-100 flex items-center justify-between gap-2"
+                                >
+                                  <span className="truncate">
+                                    <strong>{String.fromCharCode(97 + sIdx)})</strong> {st.text}
+                                  </span>
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold shrink-0 ${
+                                      st.isTrue ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'
+                                    }`}
+                                  >
+                                    {st.isTrue ? 'Đúng' : 'Sai'}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Correct answers preview for SA */}
+                          {editingBankQId !== q.id && q.type === 'sa' && q.details?.correctAnswers && (
+                            <div className="pt-1">
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs font-bold">
+                                <span>Đáp án đúng:</span>
+                                <span>{Array.isArray(q.details.correctAnswers) ? q.details.correctAnswers.join(' | ') : q.details.correctAnswers}</span>
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Inline Question Editor Box */}
+                          {editingBankQId === q.id && (
+                            <div className="mt-2 p-4 bg-amber-50/70 border-2 border-amber-300 rounded-2xl space-y-3">
+                              <div>
+                                <label className="block text-[11px] font-bold text-amber-950 uppercase mb-1">
+                                  Sửa nội dung câu hỏi:
+                                </label>
+                                <textarea
+                                  rows={2}
+                                  value={editingBankQText}
+                                  onChange={(e) => setEditingBankQText(e.target.value)}
+                                  className="w-full p-2.5 bg-white border border-amber-300 rounded-xl text-xs sm:text-sm font-semibold text-zinc-900 focus:outline-hidden focus:border-emerald-600"
+                                />
+                              </div>
+
+                              {q.type === 'mcq' && (
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                  {[0, 1, 2, 3].map(optIdx => {
+                                    const letter = String.fromCharCode(65 + optIdx);
+                                    const isCorr = editingBankQCorrectIdx === optIdx;
+                                    return (
+                                      <div
+                                        key={optIdx}
+                                        className={`p-2 rounded-xl border flex items-center gap-2 ${
+                                          isCorr ? 'bg-emerald-50 border-emerald-500' : 'bg-white border-zinc-200'
+                                        }`}
+                                      >
+                                        <button
+                                          type="button"
+                                          onClick={() => setEditingBankQCorrectIdx(optIdx)}
+                                          className={`w-7 h-7 rounded-lg text-xs font-black shrink-0 ${
+                                            isCorr ? 'bg-emerald-600 text-white' : 'bg-zinc-100 text-zinc-700'
+                                          }`}
+                                          title={`Chọn ${letter} là đáp án đúng`}
+                                        >
+                                          {letter}
+                                        </button>
+                                        <input
+                                          type="text"
+                                          value={editingBankQOptions[optIdx] || ''}
+                                          onChange={(e) => {
+                                            const next = [...editingBankQOptions];
+                                            next[optIdx] = e.target.value;
+                                            setEditingBankQOptions(next);
+                                          }}
+                                          className="flex-1 bg-transparent text-xs font-medium text-zinc-900 focus:outline-hidden"
+                                        />
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+
+                              {q.type === 'tf' && (
+                                <div className="space-y-2">
+                                  {editingBankQStatements.map((st, sIdx) => (
+                                    <div key={sIdx} className="p-2 bg-white rounded-xl border border-zinc-200 flex items-center gap-2">
+                                      <span className="text-xs font-bold text-indigo-700 w-5">{String.fromCharCode(97 + sIdx)})</span>
+                                      <input
+                                        type="text"
+                                        value={st.text}
+                                        onChange={(e) => {
+                                          const next = editingBankQStatements.map((item, i) =>
+                                            i === sIdx ? { ...item, text: e.target.value } : item
+                                          );
+                                          setEditingBankQStatements(next);
+                                        }}
+                                        className="flex-1 text-xs font-medium text-zinc-900 focus:outline-hidden"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const next = editingBankQStatements.map((item, i) =>
+                                            i === sIdx ? { ...item, isTrue: true } : item
+                                          );
+                                          setEditingBankQStatements(next);
+                                        }}
+                                        className={`px-2 py-1 rounded text-[11px] font-bold ${
+                                          st.isTrue ? 'bg-emerald-600 text-white' : 'bg-zinc-100 text-zinc-500'
+                                        }`}
+                                      >
+                                        Đúng
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const next = editingBankQStatements.map((item, i) =>
+                                            i === sIdx ? { ...item, isTrue: false } : item
+                                          );
+                                          setEditingBankQStatements(next);
+                                        }}
+                                        className={`px-2 py-1 rounded text-[11px] font-bold ${
+                                          !st.isTrue ? 'bg-red-600 text-white' : 'bg-zinc-100 text-zinc-500'
+                                        }`}
+                                      >
+                                        Sai
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+
+                              {q.type === 'sa' && (
+                                <div>
+                                  <label className="block text-[11px] font-bold text-amber-900 uppercase mb-1">
+                                    Đáp án đúng (ngăn cách dấu phẩy nếu nhiều đáp án):
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={editingBankQSAAnswers}
+                                    onChange={(e) => setEditingBankQSAAnswers(e.target.value)}
+                                    className="w-full px-3 py-1.5 bg-white border border-amber-300 rounded-lg text-xs font-bold text-zinc-900"
+                                  />
+                                </div>
+                              )}
+
+                              <div className="flex items-center justify-end gap-2 pt-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingBankQId(null)}
+                                  className="px-3 py-1.5 bg-white hover:bg-zinc-100 text-zinc-700 border border-zinc-200 rounded-lg text-xs font-bold"
+                                >
+                                  Hủy
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={savingBankQ}
+                                  onClick={() => handleSaveInlineEditedQuestion(q)}
+                                  className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-2xs"
+                                >
+                                  {savingBankQ ? 'Đang lưu...' : '💾 Lưu Câu Hỏi'}
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </div>
 
                       <div className="flex flex-wrap items-center gap-1.5 self-end sm:self-auto shrink-0">
+                        {/* Nút Sửa Câu Hỏi Trực Tiếp */}
+                        <button
+                          type="button"
+                          onClick={() => startInlineEditQuestion(q)}
+                          className="px-3 py-1.5 text-xs font-bold text-amber-800 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-xl transition-all flex items-center gap-1 cursor-pointer"
+                          title="Sửa nội dung và đáp án của câu hỏi này"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                          <span>Sửa câu hỏi</span>
+                        </button>
+
                         {/* Nút Chèn Ảnh Cho Câu Hỏi (Tự động lưu về Google Drive folder 1sBrEXMk0h8CL_CKj8lYGpuzdCKMWKs_3) */}
                         <label
                           className={`px-3 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-xs ${
@@ -3716,12 +4505,12 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                   </button>
                 </div>
 
-                {/* Common Step: Choose Subject & Set Title */}
+                {/* Common Step: Choose Subject, Category (Mine vs Shared) & Set Title */}
                 <div className="p-4 sm:p-5 bg-indigo-50/60 border border-indigo-200 rounded-2xl space-y-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div>
                       <label className="block text-xs font-extrabold text-indigo-950 uppercase mb-1.5">
-                        📚 Môn học áp dụng (Bắt buộc chọn) *
+                        📚 Môn học áp dụng (Bắt buộc) *
                       </label>
                       <select
                         value={selectedSubject}
@@ -3749,13 +4538,29 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
                     {!importTargetSetId && (
                       <div>
                         <label className="block text-xs font-extrabold text-indigo-950 uppercase mb-1.5">
+                          📂 Phân loại bộ câu hỏi
+                        </label>
+                        <select
+                          value={newSetScope}
+                          onChange={(e) => setNewSetScope(e.target.value as 'personal' | 'shared')}
+                          className="w-full px-3.5 py-2.5 bg-white border border-indigo-200 rounded-xl text-sm font-bold text-zinc-900 focus:outline-hidden focus:border-indigo-600 cursor-pointer"
+                        >
+                          <option value="personal">📌 Bộ câu hỏi của tôi (GV {effectiveTeacherName})</option>
+                          <option value="shared">🌐 Bộ câu hỏi chung (Dùng chung)</option>
+                        </select>
+                      </div>
+                    )}
+
+                    {!importTargetSetId && (
+                      <div>
+                        <label className="block text-xs font-extrabold text-indigo-950 uppercase mb-1.5">
                           🏷️ Tên bộ câu hỏi mới
                         </label>
                         <input
                           type="text"
                           value={newSetNameInput}
                           onChange={(e) => setNewSetNameInput(e.target.value)}
-                          placeholder={`Bộ câu hỏi ${questionSets.length + 1}${selectedSubject ? ` - ${selectedSubject}` : ''}`}
+                          placeholder={`Bộ câu hỏi ${(newSetScope === 'personal' ? myQuestionSets.length : sharedQuestionSets.length) + 1}${selectedSubject ? ` - ${selectedSubject}` : ''}`}
                           className="w-full px-3.5 py-2.5 bg-white border border-indigo-200 rounded-xl text-sm font-semibold focus:outline-hidden focus:border-indigo-600"
                         />
                       </div>
@@ -4957,6 +5762,21 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ onBack, isAd
           </div>
         </div>
       )}
+
+      {/* Full Question Set Viewer & Editor Modal */}
+      <QuestionSetEditorModal
+        isOpen={showSetEditorModal}
+        onClose={() => setShowSetEditorModal(false)}
+        questionSets={questionSets}
+        initialSetId={editorTargetSetId}
+        effectiveTeacherId={effectiveTeacherId}
+        onSavedSet={(updatedSet) => {
+          setQuestionSets(prev => prev.map(s => (s.id === updatedSet.id ? updatedSet : s)));
+          fetchQuestionsCount();
+          fetchQuestionsList();
+        }}
+        showToast={showToast}
+      />
 
       {/* User Guide Modal inside Teacher Dashboard */}
       <UserGuideModal
